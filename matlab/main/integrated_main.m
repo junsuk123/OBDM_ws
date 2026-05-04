@@ -94,50 +94,62 @@ try
     fprintf('═════════════════════════════════════\n\n');
     
     topics = sim.get_topics();
-    
+    resolved_tf = SimulationConfig.resolve_topic('tf', sim.get_namespace());
+    resolved_imu = SimulationConfig.resolve_topic('imu', sim.get_namespace());
+    resolved_odom = SimulationConfig.resolve_topic('odometry', sim.get_namespace());
+    resolved_gps = SimulationConfig.resolve_topic_if_available('gps', sim.get_namespace());
+
     try
         % Create ROS2 node for subscribers
         node = ros2node("/matlab_data_collector");
-        
-        % Try to subscribe to each topic individually
-        % Use a permissive QoS so MATLAB can match the ArduPilot bridge publishers.
+
+        % Use permissive QoS so MATLAB can match the bridge publishers.
         sub_imu = [];
         sub_odom = [];
         sub_tf = [];
+        sub_gps = [];
         last_imu_stamp = NaN;
         last_odom_stamp = NaN;
         last_tf_stamp = NaN;
-        
+        last_gps_stamp = NaN;
+
         try
-            sub_imu = ros2subscriber(node, topics.imu, 'sensor_msgs/msg/Imu', ...
-                'Reliability', 'besteffort', 'History', 'keepall', 'Depth', 20);
-            fprintf('  ✓ %s\\n', topics.imu);
-        catch ME
-            fprintf('  ✗ %s (unavailable)\\n', topics.imu);
+            sub_imu = ros2subscriber(node, resolved_imu, 'sensor_msgs/msg/Imu');
+            fprintf('  ✓ %s\n', resolved_imu);
+        catch
+            fprintf('  ✗ %s (unavailable)\n', resolved_imu);
         end
-        
+
+        if ~isempty(resolved_gps)
+            try
+                sub_gps = ros2subscriber(node, resolved_gps, 'sensor_msgs/msg/NavSatFix');
+                fprintf('  ✓ %s\n', resolved_gps);
+            catch
+                fprintf('  ✗ %s (unavailable)\n', resolved_gps);
+            end
+        else
+            fprintf('  - GPS topic not published; skipping GPS subscription\n');
+        end
+
         try
-            sub_odom = ros2subscriber(node, topics.odometry, 'nav_msgs/msg/Odometry', ...
-                'Reliability', 'besteffort', 'History', 'keepall', 'Depth', 20);
-            fprintf('  ✓ %s\n', topics.odometry);
-        catch ME
-            fprintf('  ✗ %s (unavailable)\n', topics.odometry);
+            sub_odom = ros2subscriber(node, resolved_odom, 'nav_msgs/msg/Odometry');
+            fprintf('  ✓ %s\n', resolved_odom);
+        catch
+            fprintf('  ✗ %s (unavailable)\n', resolved_odom);
         end
-        
+
         try
-            sub_tf = ros2subscriber(node, topics.tf, 'tf2_msgs/msg/TFMessage', ...
-                'Reliability', 'besteffort', 'History', 'keepall', 'Depth', 20);
-            fprintf('  ✓ %s\\n', topics.tf);
-        catch ME
-            fprintf('  ✗ %s (unavailable)\\n', topics.tf);
+            sub_tf = ros2subscriber(node, resolved_tf, 'tf2_msgs/msg/TFMessage');
+            fprintf('  ✓ %s\n', resolved_tf);
+        catch
+            fprintf('  ✗ %s (unavailable)\n', resolved_tf);
         end
-        fprintf('\\n');
-        
+        fprintf('\n');
+
         % Collect data for 10 seconds
-        data_log = struct('imu', [], 'odom', [], 'tf', []);
-        
+        data_log = struct('imu', [], 'gps', [], 'odom', [], 'tf', []);
+
         for t = 1:10
-            % Read the latest IMU sample without blocking.
             if ~isempty(sub_imu)
                 try
                     [msg, status] = receive(sub_imu, 0.5);
@@ -151,8 +163,21 @@ try
                 catch
                 end
             end
-            
-            % Read the latest odometry sample without blocking.
+
+            if ~isempty(sub_gps)
+                try
+                    [msg, status] = receive(sub_gps, 0.5);
+                    if status && ~isempty(msg)
+                        stamp = double(msg.Header.Stamp.Sec) + double(msg.Header.Stamp.Nanosec) * 1e-9;
+                        if isnan(last_gps_stamp) || stamp ~= last_gps_stamp
+                            data_log.gps = [data_log.gps; msg.Latitude, msg.Longitude, msg.Altitude];
+                            last_gps_stamp = stamp;
+                        end
+                    end
+                catch
+                end
+            end
+
             if ~isempty(sub_odom)
                 try
                     [msg, status] = receive(sub_odom, 0.5);
@@ -166,8 +191,7 @@ try
                 catch
                 end
             end
-            
-            % Read the latest TF sample without blocking.
+
             if ~isempty(sub_tf)
                 try
                     [msg, status] = receive(sub_tf, 0.5);
@@ -182,35 +206,27 @@ try
                 catch
                 end
             end
-            
-            fprintf('[%2d/10] IMU: %d messages, ODOM: %d messages, TF: %d messages\n', ...
-                t, size(data_log.imu, 1), size(data_log.odom, 1), size(data_log.tf, 1));
+
+            fprintf('[%2d/10] IMU: %d messages, GPS: %d messages, ODOM: %d messages, TF: %d messages\n', ...
+                t, size(data_log.imu, 1), size(data_log.gps, 1), size(data_log.odom, 1), size(data_log.tf, 1));
             pause(1);
         end
-        
-        % Display data statistics
-        fprintf('\\nData Collection Summary:\\n');
-        fprintf('  IMU messages: %d\\n', size(data_log.imu, 1));
+
+        fprintf('\nData Collection Summary:\n');
+        fprintf('  IMU messages: %d\n', size(data_log.imu, 1));
+        fprintf('  GPS messages: %d\n', size(data_log.gps, 1));
         fprintf('  ODOM messages: %d\n', size(data_log.odom, 1));
-        fprintf('  TF messages: %d\\n', size(data_log.tf, 1));
-        
-        % Cleanup subscribers and node
-        clear sub_imu sub_odom sub_tf node;
-        
+        fprintf('  TF messages: %d\n', size(data_log.tf, 1));
+
+        clear sub_imu sub_gps sub_odom sub_tf node;
     catch ME
-        fprintf('Data collection error: %s\\n', ME.message);
-        % Cleanup on error
+        fprintf('Data collection error: %s\n', ME.message);
         try
-            clear sub_imu sub_odom sub_tf node;
+            clear sub_imu sub_gps sub_odom sub_tf node;
         catch
         end
     end
-    
-    % ====== 5. Final Status ======
-    fprintf('\\n═════════════════════════════════════\n');
-    fprintf('5️⃣ Final Simulation Status\n');
-    fprintf('═════════════════════════════════════\n\n');
-    
+
     sim.print_status();
     
     % ====== 6. Completion ======

@@ -1,213 +1,325 @@
-%% 
-% → → MATLAB 
-% :
-% cd ~/OBDM_ws/matlab
-% addpath(genpath(pwd))
-% run('control/circle_flight.m')
+%% Circle Flight Test for ArduPilot ROS 2 Waypoint Goal Interface
+% Generates a circular track in MATLAB and publishes waypoints via /ap/cmd_gps_pose.
+%
+% Usage:
+%   cd ~/OBDM_ws/matlab
+%   addpath(genpath(pwd))
+%   run('control/circle_flight.m')
 
 clear; clc;
-fprintf('\n=== MATLAB Circle Flight Controller (Demo) ===\n');
+fprintf('\n=== MATLAB Circle Flight Test ===\n');
 
-% add (SimulationConfig required)
-addpath(genpath(pwd));
+matlab_root = fileparts(fileparts(mfilename('fullpath')));
+addpath(genpath(matlab_root));
 
-% set
-RADIUS_M = 100; % (m)
-NUM_POINTS = 36; % 
-ALTITUDE_AGL = 30; % ( )
-SPEED = SimulationConfig.AIRCRAFT_CRUISE_SPEED; % m/s
-PAUSE_BETWEEN_CMD = 1.0; % (s)
+TRACK_STYLE = 'circle';
+TRACK_RADIUS_M = 100;
+TRACK_POINTS = 36;
+TRACK_LOOPS = 1;
+TRACK_TOLERANCE_M = 30;
+WAYPOINT_TIMEOUT_S = 20;
+WAYPOINT_HOLD_S = 1.0;
+ALTITUDE_AGL_M = 30;
+
+sensor_config = struct( ...
+    'navsat', true, ...
+    'imu', true, ...
+    'battery', true, ...
+    'airspeed', false, ...
+    'pose', true, ...
+    'twist', true, ...
+    'geopose', false, ...
+    'static_tf', true, ...
+    'status', true, ...
+    'rc', true);
+
+sim = [];
+receiver = [];
+arm_client = [];
+mode_client = [];
+goal_pub = [];
+cleanup_obj = onCleanup(@cleanup_on_exit);
 
 try
- fprintf(' add\n');
+    fprintf('1) Initializing simulation...\n');
+    sim = SimulationManager('verbose', true);
+    sim = sim.initialize();
+    sim = sim.start_simulation( ...
+        'auto_launch', true, ...
+        'wait_for_topics', true, ...
+        'ap_dds_sensor_config', sensor_config);
 
- % namespace detect
- fprintf('namespace detect ...\n');
- [status, output] = system('ros2 topic list 2>/dev/null');
- detected_ns = '/ap'; % default
- 
- if status == 0 && ~isempty(output)
- % /ap namespace 
- if contains(output, '/ap/gps')
- detected_ns = '/ap';
- else
- % namespace 
- lines = strsplit(output, newline);
- for i = 1:length(lines)
- line = strtrim(lines{i});
- if contains(line, '/gps') && ~contains(line, '/gz')
- parts = strsplit(line, '/');
- if length(parts) >= 2
- detected_ns = ['/' parts{2}];
- break;
- end
- end
- end
- end
- end
- 
- fprintf('detect namespace: %s\n', detected_ns);
- 
- % ROS2 topic/ ( detect namespace)
- ARM_SVC = sprintf('%s/arm_motors', detected_ns);
- MODE_SVC = sprintf('%s/mode_switch', detected_ns);
- GOAL_TOPIC = sprintf('%s/cmd_gps_pose', detected_ns);
+    ns = sim.get_namespace();
+    fprintf('  Namespace: %s\n', ns);
 
- % Gazebo(ArduPlane) check , 
- fprintf('ROS2 topic check ... ( 30 )\n');
- max_wait = 30; t0 = tic;
- topic_ready = false;
- gps_topic = sprintf('%s/gps/sample', detected_ns);
- while toc(t0) < max_wait
- [s, out] = system(sprintf('ros2 topic list 2>/dev/null | grep "%s" || true', gps_topic));
- if s == 0 && ~isempty(strtrim(out))
- topic_ready = true; break;
- end
- if toc(t0) > 2 && ~exist(fullfile(pwd,'../simulation/launch/launch_plane.sh'),'file')
- % no local launch script, break and try creat receiver (user may manage launch externally)
- break;
- end
- % try to start the launch script once if topic not ready after a short delay
- if toc(t0) < 5
- % continue wait
- elseif toc(t0) < 6
- % attempt to start the launch script in background
- launch_script = fullfile('..','simulation','launch','launch_plane.sh');
- if exist(launch_script,'file')
- fprintf('simulation Start ()...\n');
- cmd = sprintf('bash %s > /tmp/obdm_plane_launch.log 2>&1 &', launch_script);
- system(cmd);
- end
- end
- pause(1.0);
- end
+    goal_topic = SimulationConfig.resolve_topic('cmd_gps_pose', ns);
+    arm_service = SimulationConfig.resolve_service('arm_motors', ns);
+    mode_service = SimulationConfig.resolve_service('mode_switch', ns);
+    prearm_service = SimulationConfig.resolve_service('prearm_check', ns);
 
- % receive and subscribe
- receiver = AircraftStateReceiver('verbose', true, 'enable_logg', false);
- receiver.subscribe_to_topics();
- pause(1.0);
+    if isempty(goal_topic)
+        error('cmd_gps_pose topic could not be resolved for namespace %s', ns);
+    end
 
- % 
- st = receiver.get_current_state();
- if ~st.is_valid
- warn(' Info receive . ...');
- pause(3.0);
- st = receiver.get_current_state();
- end
+    fprintf('2) Subscribing to aircraft state...\n');
+    receiver = AircraftStateReceiver('verbose', true, 'enable_logg', false);
+    receiver.subscribe_to_topics();
+    state = wait_for_valid_state(receiver, 30);
 
- lat0 = st.position.latitude;
- lon0 = st.position.longitude;
- alt0 = st.position.altitude;
+    lat0 = state.position.latitude;
+    lon0 = state.position.longitude;
+    alt0 = state.position.altitude;
+    target_alt = alt0 + ALTITUDE_AGL_M;
 
- fprintf(' : LAT=%.6f LON=%.6f ALT=%.1f m\n', lat0, lon0, alt0);
+    fprintf('  Home position: LAT=%.6f LON=%.6f ALT=%.1f m\n', lat0, lon0, alt0);
+    fprintf('  Target altitude: %.1f m AGL\n', ALTITUDE_AGL_M);
 
- % 
- arm_client = ros2serviceclient(ARM_SVC, 'ardupilot_msgs/srv/ArmMotors');
- mode_client = ros2serviceclient(MODE_SVC, 'ardupilot_msgs/srv/ModeSwitch');
- goal_pub = ros2publisher(GOAL_TOPIC, 'ardupilot_msgs/msg/GlobalPosition');
+    fprintf('3) Connecting ROS 2 interfaces...\n');
+    arm_client = ros2serviceclient(arm_service, 'ardupilot_msgs/srv/ArmMotors');
+    mode_client = ros2serviceclient(mode_service, 'ardupilot_msgs/srv/ModeSwitch');
+    goal_pub = ros2publisher(goal_topic, 'ardupilot_msgs/msg/GlobalPosition');
 
- % 1) (arm)
- fprintf(' ...\n');
- arm_req = ros2message(arm_client);
- arm_req.arm = true;
- try
- arm_resp = call(arm_client, arm_req, 'Timeout', 5);
- fprintf('Arm : %s\n', mat2str(arm_resp));
- catch
- warn('Arm failed (). .');
- end
+    if ~isempty(prearm_service)
+        try
+            prearm_client = ros2serviceclient(prearm_service, 'std_srvs/srv/Trigger');
+            prearm_req = ros2message(prearm_client);
+            prearm_resp = call(prearm_client, prearm_req, 'Timeout', 5);
+            fprintf('  Prearm check: success=%d | %s\n', prearm_resp.success, prearm_resp.message);
+        catch ME
+            fprintf('  Prearm check skipped: %s\n', ME.message);
+        end
+    end
 
- % 2) 
- PLANE_MODE_TAKEOFF = 13;
- PLANE_MODE_GUIDED = 15;
- fprintf(' : TAKEOFF\n');
- mode_req = ros2message(mode_client);
- mode_req.mode = PLANE_MODE_TAKEOFF;
- try
- call(mode_client, mode_req, 'Timeout', 5);
- catch
- warn(' () failed');
- end
+    fprintf('4) Arming and switching to guided control...\n');
+    arm_vehicle(arm_client, true);
+    switch_mode(mode_client, 13);
+    pause(1.0);
+    switch_mode(mode_client, 15);
 
- % : (simulation )
- target_alt = alt0 + ALTITUDE_AGL;
- fprintf(' : %.1f m (AGL +%d m)\n', target_alt, ALTITUDE_AGL);
- tstart = tic;
- while receiver.get_current_state().position.altitude < target_alt - 2 && toc(tstart) < 60
- fprintf(' : %.1f m\n', receiver.get_current_state().position.altitude);
- pause(1.0);
- end
+    fprintf('5) Waiting for climb...\n');
+    wait_until_altitude(receiver, target_alt, 60);
 
- % 3) GUIDED 
- fprintf(' : GUIDED\n');
- mode_req = ros2message(mode_client);
- mode_req.mode = PLANE_MODE_GUIDED;
- try
- call(mode_client, mode_req, 'Timeout', 5);
- catch
- warn(' (GUIDED) failed');
- end
+    fprintf('6) Building circle trajectory...\n');
+    track_waypoints = build_track_waypoints(lat0, lon0, target_alt, TRACK_STYLE, TRACK_RADIUS_M, TRACK_POINTS, TRACK_LOOPS);
+    fprintf('  Waypoints: %d\n', size(track_waypoints, 1));
 
- % 4) publish
- fprintf(' Start ( %d m, %d )\n', RADIUS_M, NUM_POINTS);
+    fprintf('7) Following circle...\n');
+    for i = 1:size(track_waypoints, 1)
+        lat_cmd = track_waypoints(i, 1);
+        lon_cmd = track_waypoints(i, 2);
+        alt_cmd = track_waypoints(i, 3);
 
- % ( 1 deg = ~111319.9 m)
- deg_per_m_lat = 1 / 111319.9;
- deg_per_m_lon = 1 / (111319.9 * cosd(lat0));
+        publish_global_goal(goal_pub, lat_cmd, lon_cmd, alt_cmd);
+        fprintf('  [%03d/%03d] LAT=%.6f LON=%.6f ALT=%.1f\n', i, size(track_waypoints, 1), lat_cmd, lon_cmd, alt_cmd);
+        reached = wait_until_close(receiver, lat_cmd, lon_cmd, alt_cmd, TRACK_TOLERANCE_M, WAYPOINT_TIMEOUT_S);
+        if ~reached
+            warning('circle_flight:WaypointTimeout', 'Waypoint %d/%d not reached before timeout.', i, size(track_waypoints, 1));
+        end
+        pause(WAYPOINT_HOLD_S);
+    end
 
- for k = 1:NUM_POINTS
- theta = 2*pi*(k-1)/NUM_POINTS;
- dx = RADIUS_M * cos(theta);
- dy = RADIUS_M * sin(theta);
+    fprintf('8) Sending final loiter/home point...\n');
+    publish_global_goal(goal_pub, lat0, lon0, target_alt);
+    pause(3.0);
 
- lat_cmd = lat0 + dy * deg_per_m_lat;
- lon_cmd = lon0 + dx * deg_per_m_lon;
- alt_cmd = target_alt;
+    fprintf('9) Disarming...\n');
+    arm_vehicle(arm_client, false);
 
- msg = ros2message(goal_pub);
- msg.latitude = lat_cmd;
- msg.longitude = lon_cmd;
- msg.altitude = alt_cmd;
- msg.coordinate_frame = uint8(5); % FRAME_GLOBAL_INT
- msg.header.frame_id = 'map';
-
- send(goal_pub, msg);
- fprintf('[%02d/%02d] publish: LAT=%.6f LON=%.6f ALT=%.1f\n', k, NUM_POINTS, lat_cmd, lon_cmd, alt_cmd);
- pause(PAUSE_BETWEEN_CMD);
- end
-
- % 5) ( ): 
- fprintf(' : \n');
- land_msg = ros2message(goal_pub);
- land_msg.latitude = lat0;
- land_msg.longitude = lon0;
- land_msg.altitude = alt0 + 2; % 
- land_msg.coordinate_frame = uint8(5);
- land_msg.header.frame_id = 'map';
- send(goal_pub, land_msg);
- pause(5.0);
-
- fprintf(' \n');
- arm_req = ros2message(arm_client);
- arm_req.arm = false;
- try
- call(arm_client, arm_req, 'Timeout', 5);
- catch
- warn(' failed');
- end
-
- fprintf(' complete/done\n');
+    fprintf('\nCircle flight test complete.\n');
 
 catch ME
- fprintf('error : %s\n', ME.message);
- rethrow(ME);
+    fprintf('\n✗ Circle flight test failed: %s\n', ME.message);
+    rethrow(ME);
 end
 
-% cleanup
-try
- receiver.unsubscribe_from_topics();
- clear receiver;
-catch
+function waypoints = build_track_waypoints(center_lat, center_lon, altitude_m, style, radius_m, num_points, loops)
+    if nargin < 7 || isempty(loops)
+        loops = 1;
+    end
+
+    waypoints = [];
+    deg_per_m_lat = 1 / 111319.9;
+    deg_per_m_lon = 1 / (111319.9 * cosd(center_lat));
+
+    base_t = linspace(0, 2 * pi, num_points + 1);
+    base_t(end) = [];
+
+    for loop_index = 1:loops
+        t = base_t + 2 * pi * (loop_index - 1);
+        [east_m, north_m] = local_track_points(style, radius_m, t);
+        lat = center_lat + north_m(:) * deg_per_m_lat;
+        lon = center_lon + east_m(:) * deg_per_m_lon;
+        alt = altitude_m * ones(numel(lat), 1);
+        waypoints = [waypoints; lat, lon, alt]; %#ok<AGROW>
+    end
 end
 
-fprintf(' terminate\n');
+function [east_m, north_m] = local_track_points(style, radius_m, t)
+    switch lower(style)
+        case 'square'
+            corners = [
+                radius_m, 0;
+                0, radius_m;
+                -radius_m, 0;
+                0, -radius_m;
+                radius_m, 0];
+            segment_count = numel(t);
+            segment_edges = round(linspace(1, size(corners, 1), segment_count));
+            east_m = corners(segment_edges, 1);
+            north_m = corners(segment_edges, 2);
+        otherwise
+            east_m = radius_m * cos(t);
+            north_m = radius_m * sin(t);
+    end
+end
+
+function publish_global_goal(goal_pub, latitude, longitude, altitude)
+    msg = ros2message(goal_pub);
+    if isprop(msg, 'latitude')
+        msg.latitude = latitude;
+    end
+    if isprop(msg, 'longitude')
+        msg.longitude = longitude;
+    end
+    if isprop(msg, 'altitude')
+        msg.altitude = altitude;
+    end
+    if isprop(msg, 'coordinate_frame')
+        msg.coordinate_frame = uint8(5);
+    end
+    if isprop(msg, 'type_mask')
+        msg.type_mask = uint8(0);
+    end
+    if isprop(msg, 'header')
+        try
+            msg.header.frame_id = 'map';
+        catch
+        end
+    end
+    if isprop(msg, 'Header')
+        try
+            msg.Header.FrameId = 'map';
+        catch
+        end
+    end
+    send(goal_pub, msg);
+end
+
+function arm_vehicle(arm_client, should_arm)
+    req = ros2message(arm_client);
+    if isprop(req, 'arm')
+        req.arm = logical(should_arm);
+    elseif isprop(req, 'value')
+        req.value = logical(should_arm);
+    elseif isprop(req, 'Value')
+        req.Value = logical(should_arm);
+    end
+    resp = call(arm_client, req, 'Timeout', 5);
+    if isprop(resp, 'result')
+        fprintf('  Arm response: %d\n', resp.result);
+    end
+end
+
+function switch_mode(mode_client, mode_value)
+    req = ros2message(mode_client);
+    if isprop(req, 'mode')
+        req.mode = mode_value;
+    elseif isprop(req, 'Mode')
+        req.Mode = mode_value;
+    elseif isprop(req, 'custom_mode')
+        req.custom_mode = mode_value;
+    elseif isprop(req, 'CustomMode')
+        req.CustomMode = mode_value;
+    end
+    resp = call(mode_client, req, 'Timeout', 5);
+    if isprop(resp, 'status')
+        fprintf('  Mode switch status: %d\n', resp.status);
+    end
+end
+
+function state = wait_for_valid_state(receiver, timeout_s)
+    t0 = tic;
+    state = receiver.get_current_state();
+    while toc(t0) < timeout_s
+        state = receiver.get_current_state();
+        if state.is_valid && isfield(state, 'position') && isfield(state.position, 'latitude') && ~isnan(state.position.latitude)
+            return;
+        end
+        pause(0.5);
+    end
+    error('Timed out waiting for valid aircraft state.');
+end
+
+function wait_until_altitude(receiver, target_altitude_m, timeout_s)
+    t0 = tic;
+    while toc(t0) < timeout_s
+        state = receiver.get_current_state();
+        current_alt = state.position.altitude;
+        fprintf('  Altitude: %.1f m\n', current_alt);
+        if current_alt >= target_altitude_m - 2
+            return;
+        end
+        pause(1.0);
+    end
+    warning('Altitude target not reached before timeout.');
+end
+
+function reached = wait_until_close(receiver, target_lat, target_lon, target_alt, tolerance_m, timeout_s)
+    reached = false;
+    t0 = tic;
+    while toc(t0) < timeout_s
+        state = receiver.get_current_state();
+        if ~state.is_valid
+            pause(0.5);
+            continue;
+        end
+
+        if ~isfield(state.position, 'latitude') || isnan(state.position.latitude)
+            pause(0.5);
+            continue;
+        end
+
+        horizontal_error = gps_distance_m(state.position.latitude, state.position.longitude, target_lat, target_lon);
+        altitude_error = abs(state.position.altitude - target_alt);
+        total_error = hypot(horizontal_error, altitude_error);
+
+        if total_error <= tolerance_m
+            reached = true;
+            return;
+        end
+
+        fprintf('    error=%.1f m (horizontal=%.1f, alt=%.1f)\n', total_error, horizontal_error, altitude_error);
+        pause(0.5);
+    end
+end
+
+function distance_m = gps_distance_m(lat1, lon1, lat2, lon2)
+    earth_radius_m = 6371000;
+    dlat = deg2rad(lat2 - lat1);
+    dlon = deg2rad(lon2 - lon1);
+    a = sin(dlat / 2)^2 + cosd(lat1) * cosd(lat2) * sin(dlon / 2)^2;
+    c = 2 * atan2(sqrt(a), sqrt(max(0, 1 - a)));
+    distance_m = earth_radius_m * c;
+end
+
+function cleanup_on_exit()
+    try
+        if evalin('caller', 'exist(''receiver'', ''var'')')
+            caller_receiver = evalin('caller', 'receiver');
+            if ~isempty(caller_receiver)
+                caller_receiver.unsubscribe_from_topics();
+            end
+        end
+    catch
+    end
+
+    try
+        if evalin('caller', 'exist(''sim'', ''var'')')
+            caller_sim = evalin('caller', 'sim');
+            if ~isempty(caller_sim)
+                caller_sim.stop_simulation();
+            end
+        end
+    catch
+    end
+end

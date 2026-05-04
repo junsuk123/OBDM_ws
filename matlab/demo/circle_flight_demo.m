@@ -51,8 +51,13 @@ try
     
     try
         if exist('ros2serviceclient', 'builtin') || ~isempty(which('ros2serviceclient'))
-            arm_client = ros2serviceclient(services.arm_motors, 'ardupilot_msgs/srv/ArmMotors');
-            mode_client = ros2serviceclient(services.mode_switch, 'ardupilot_msgs/srv/ModeSwitch');
+            if contains(lower(sim.get_namespace()), 'mavros')
+                arm_client = ros2serviceclient(services.arm_motors, 'mavros_msgs/srv/CommandBool');
+                mode_client = ros2serviceclient(services.mode_switch, 'mavros_msgs/srv/SetMode');
+            else
+                arm_client = ros2serviceclient(services.arm_motors, 'ardupilot_msgs/srv/ArmMotors');
+                mode_client = ros2serviceclient(services.mode_switch, 'ardupilot_msgs/srv/ModeSwitch');
+            end
             services_available = true;
             fprintf('  ✓ Services connected\n');
         else
@@ -72,7 +77,11 @@ try
         fprintf('  → Attempting arm...\n');
         try
             arm_req = ros2message(arm_client);
-            arm_req.Value = uint8(1);
+            if isprop(arm_req, 'value')
+                arm_req.value = true;
+            elseif isprop(arm_req, 'Value')
+                arm_req.Value = uint8(1);
+            end
             arm_resp = call(arm_client, arm_req);
             fprintf('  ✓ Arm command sent\n');
         catch ME
@@ -85,7 +94,13 @@ try
         fprintf('  → Changing mode to GUIDED...\n');
         try
             mode_req = ros2message(mode_client);
-            mode_req.Mode = 'GUIDED';
+            if isprop(mode_req, 'custom_mode')
+                mode_req.custom_mode = 'GUIDED';
+            elseif isprop(mode_req, 'CustomMode')
+                mode_req.CustomMode = 'GUIDED';
+            elseif isprop(mode_req, 'Mode')
+                mode_req.Mode = 'GUIDED';
+            end
             mode_resp = call(mode_client, mode_req);
             fprintf('  ✓ Mode change sent\n');
         catch ME

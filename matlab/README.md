@@ -103,11 +103,50 @@ state.timestamp     % 데이터 타임스탬프
 ```
 
 **ROS2 구독 토픽**:
-- `/ap/tf`: 위치 및 자세 (TransformStamped)
-- `/ap/imu/sample`: IMU 데이터 (Imu)
-- `/ap/gps/sample`: GPS 데이터 (NavSatFix)
-- `/ap/baro/sample`: 기압계 데이터 (FluidPressure)
-- `/ap/battery/state`: 배터리 정보 (BatteryState)
+- `/ap/tf_static`: 고정 변환 정보
+- `/ap/imu/experimental/data`: IMU 데이터 (Imu)
+- `/ap/navsat`: GPS 데이터 (NavSatFix)
+- `/ap/airspeed`: 대기속도 추정 (Airspeed)
+- `/ap/battery`: 배터리 정보 (BatteryState)
+- `/ap/rc`: RC 상태 (Rc)
+- `/ap/status`: 차량 상태 (Status)
+
+토픽 해석은 현재 ROS2 topic list를 기준으로 이루어지며, `/ap` 브리지뿐 아니라 `/mavros` 브리지의 일반적인 센서 토픽도 자동으로 후보에 포함됩니다.
+
+ArduPilot ROS 2 인터페이스 문서와 workspace의 `AP_DDS` 구현 기준으로는 센서가 `/ap/navsat`, `/ap/battery`, `/ap/imu/experimental/data`, `/ap/airspeed`, `/ap/rc`, `/ap/status`, `/ap/tf_static` 쪽으로 나오고, 제어는 `/ap/cmd_gps_pose`, `/ap/cmd_vel`, `/ap/joy`를 MATLAB이 발행하는 구조입니다. 서비스는 `/ap/arm_motors`, `/ap/mode_switch`, `/ap/prearm_check`, `/ap/experimental/takeoff`를 사용합니다.
+
+**ArduPlane 제어/피드백 토픽 후보**:
+- `/ap/attitude`: 실제 자세 피드백
+- `/ap/attitude_target`: 목표 자세 피드백
+- `/ap/nav_controller_output`: 내비게이션 제어 출력
+- `/ap/wind`: 풍향/풍속 추정
+- `/ap/pid_tuning`: PID 튜닝 피드백
+
+ArduPlane 소스 기준으로 제어 입력은 주로 GUIDED 계열 명령과 MAVLink 외부 제어 경로로 들어가며, 위 토픽들은 상태 및 제어 결과를 MATLAB에서 추적할 때 참고하는 텔레메트리입니다.
+
+제어 경로는 브리지에 따라 자동 전환됩니다. ArduPilot 전용 브리지는 기존 `arm_motors` / `mode_switch` / `cmd_gps_pose` 흐름을 쓰고, MAVROS 브리지는 `/mavros/cmd/arming`, `/mavros/set_mode`, `/mavros/setpoint_position/local`을 우선 사용합니다.
+
+MATLAB에서 AP DDS 센서 활성화 값을 바꾸려면 `SimulationManager.start_simulation`에 `ap_dds_sensor_config`를 넘기면 됩니다. 예를 들면 아래처럼 특정 센서만 켜고 나머지를 끌 수 있습니다.
+
+```matlab
+sim = SimulationManager('verbose', true);
+sim = sim.start_simulation( ...
+    'auto_launch', true, ...
+    'wait_for_topics', true, ...
+    'ap_dds_sensor_config', struct( ...
+        'navsat', true, ...
+        'imu', true, ...
+        'battery', true, ...
+        'airspeed', false, ...
+        'pose', true, ...
+        'twist', true, ...
+        'geopose', false, ...
+        'static_tf', true));
+```
+
+이 설정이 바뀌면 MATLAB이 `~/ardu_ws/src/ardupilot/libraries/AP_DDS/AP_DDS_config.h`를 갱신하고, 기본값대로면 `ardupilot_sitl`을 다시 빌드한 뒤 런치를 시작합니다.
+
+원형 궤적 추종 제어 테스트는 [control/circle_flight.m](control/circle_flight.m)에서 실행할 수 있습니다. 이 스크립트는 원형 웨이포인트를 MATLAB에서 만들고 `/ap/cmd_gps_pose` waypoint goal 인터페이스로 순차 발행합니다.
 
 ### ChargeStationManager 클래스
 

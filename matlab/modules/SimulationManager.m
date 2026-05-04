@@ -15,6 +15,7 @@ classdef SimulationManager
         verbose = false;
         ros2_manager;
         process_manager;
+        launch_prefix = '';
     end
     
     methods
@@ -105,7 +106,7 @@ classdef SimulationManager
             % Build the exact ros2 launch command used in the terminal.
             % Keep GUI/session exports in the wrapper so MATLAB inherits the
             % same X11 and DBus context as an interactive shell.
-            cmd = sprintf([...
+            base_cmd = sprintf([...
                 'unset LD_LIBRARY_PATH; ' ...
                 'unset QT_PLUGIN_PATH; ' ...
                 'unset QML2_IMPORT_PATH; ' ...
@@ -120,6 +121,12 @@ classdef SimulationManager
                 'if [ -f %s/install/setup.bash ]; then source %s/install/setup.bash; fi; ' ...
                 'ros2 launch ardupilot_gz_bringup alti_transition_runway.launch.py'], ...
                 display_env, xauthority_env, xdg_runtime_env, dbus_env, ardu_ws, ardu_ws);
+
+            if ~isempty(strtrim(obj.launch_prefix))
+                cmd = sprintf('%s && %s', strtrim(obj.launch_prefix), base_cmd);
+            else
+                cmd = base_cmd;
+            end
             
             if obj.verbose
                 fprintf('[SimulationManager] Launch command built successfully\\n');
@@ -133,7 +140,40 @@ classdef SimulationManager
             p = inputParser;
             addParameter(p, 'auto_launch', true, @islogical);
             addParameter(p, 'wait_for_topics', true, @islogical);
+            addParameter(p, 'ap_dds_sensor_config', struct(), @isstruct);
+            addParameter(p, 'rebuild_ardupilot', true, @islogical);
             parse(p, varargin{:});
+
+            obj.launch_prefix = '';
+
+            if ~isempty(fieldnames(p.Results.ap_dds_sensor_config))
+                config_result = SimulationConfig.apply_ap_dds_sensor_config(p.Results.ap_dds_sensor_config);
+                if obj.verbose
+                    fprintf('[SimulationManager] AP_DDS config path: %s\n', config_result.config_path);
+                    if ~isempty(config_result.backup_path)
+                        fprintf('[SimulationManager] AP_DDS backup path: %s\n', config_result.backup_path);
+                    end
+                end
+
+                if config_result.changed && p.Results.rebuild_ardupilot
+                    obj.launch_prefix = sprintf('cd %s && colcon build --packages-select ardupilot_sitl --cmake-force-configure --event-handlers console_direct+', fullfile(getenv('HOME'), 'ardu_ws'));
+                    if obj.verbose
+                        fprintf('[SimulationManager] AP_DDS rebuild enabled before launch\n');
+                    end
+                elseif config_result.changed
+                    fprintf('⚠️ AP_DDS config updated but rebuild disabled. Rebuild ardupilot_sitl before launch for changes to take effect.\n');
+                end
+
+                if obj.verbose && ~isempty(config_result.applied_fields)
+                    fprintf('[SimulationManager] AP_DDS applied fields: %s\n', strjoin(config_result.applied_fields, ', '));
+                end
+
+                if obj.verbose && ~isempty(config_result.messages)
+                    for i = 1:numel(config_result.messages)
+                        fprintf('[SimulationManager] %s\n', config_result.messages{i});
+                    end
+                end
+            end
             
             if obj.verbose
                 fprintf('[SimulationManager] Starting simulation...\\n');

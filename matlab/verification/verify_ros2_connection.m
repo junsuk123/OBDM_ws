@@ -54,7 +54,7 @@ fprintf('━━━━━━━━━━━━━━━━━━━━━━━�
 
 try
  % add
- addpath(genpath(pwd));
+ addpath(genpath(fileparts(pwd)));
  fprintf('✓ add\n');
  
  % set 
@@ -81,7 +81,10 @@ try
  lines = strsplit(out, '\n');
  for i=1:length(lines)
  ln = strtrim(lines{i});
- if contains(ln, '/gps')
+ if contains(ln, '/mavros/')
+ detected_ns = '/mavros';
+ break;
+ elseif contains(ln, '/gps')
  parts = strsplit(ln, '/');
  if length(parts) >= 2 && ~isempty(parts{2})
  detected_ns = ['/' parts{2}];
@@ -94,7 +97,13 @@ catch
  detected_ns = '/ap';
 end
 
-topics = SimulationConfig.get_topics(detected_ns);
+topics = struct(...
+ 'tf', SimulationConfig.resolve_topic('tf', detected_ns), ...
+ 'imu', SimulationConfig.resolve_topic('imu', detected_ns), ...
+ 'gps', SimulationConfig.resolve_topic('gps', detected_ns), ...
+ 'baro', SimulationConfig.resolve_topic('baro', detected_ns), ...
+ 'battery', SimulationConfig.resolve_topic('battery', detected_ns) ...
+);
 
 expected_topics = {
  topics.tf, 'geometry_msgs/TransformStamped', 'TF (/)';

@@ -7,17 +7,20 @@ fprintf('║ Quick ROS2 Connection ║\n');
 fprintf('╚════════════════════════════════╝\n\n');
 
 % set add
-addpath(genpath(pwd));
+addpath(genpath(fileparts(pwd)));
 
 % namespace detect
 fprintf('ROS2 topic detect ...\n');
 [status, out] = system('ros2 topic list 2>/dev/null');
 if status == 0 && ~isempty(out)
  lines = strsplit(out, newline);
- detected_ns = '/plane1'; % default
+ detected_ns = '/ap'; % default
  for i = 1:length(lines)
  line = strtrim(lines{i});
- if contains(line, '/imu') && ~contains(line, '/gz') && length(line) > 5
+ if contains(line, '/mavros/') && ~contains(line, '/gz')
+ detected_ns = '/mavros';
+ break;
+ elseif contains(line, '/imu') && ~contains(line, '/gz') && length(line) > 5
  parts = strsplit(line, '/');
  if length(parts) >= 2
  detected_ns = ['/' parts{2}];
@@ -33,9 +36,9 @@ fprintf('detect namespace: %s\n\n', detected_ns);
 
 % topic 
 topics = struct(...
- 'tf', sprintf('%s/tf', detected_ns), ...
- 'imu', sprintf('%s/imu', detected_ns), ...
- 'odometry', sprintf('%s/odometry', detected_ns), ...
+ 'tf', SimulationConfig.resolve_topic('tf', detected_ns), ...
+ 'imu', SimulationConfig.resolve_topic('imu', detected_ns), ...
+ 'odometry', SimulationConfig.resolve_topic('odometry', detected_ns), ...
  'clock', sprintf('%s/clock', detected_ns) ...
 );
 

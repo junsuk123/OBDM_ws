@@ -4,6 +4,7 @@
 classdef AircraftStateReceiver < handle
  properties (Access = private)
  % ROS2 subscribe (subscribers)
+ subscriber_node
  subscriber_tf % / 
  subscriber_imu % IMU 
  subscriber_gps % GPS
@@ -63,65 +64,50 @@ classdef AircraftStateReceiver < handle
  if obj.verbose
  fprintf('[AircraftStateReceiver] ROS2 topic subscribe Start...\n');
  end
- 
- % namespace('/ap') 
+
  try
- topics = SimulationConfig.get_topics('/ap');
- obj.subscriber_tf = ros2subscriber(topics.tf, @obj.callback_tf);
- obj.subscriber_imu = ros2subscriber(topics.imu, @obj.callback_imu);
- obj.subscriber_gps = ros2subscriber(topics.gps, @obj.callback_gps);
- obj.subscriber_baro = ros2subscriber(topics.baro, @obj.callback_baro);
- obj.subscriber_battery = ros2subscriber(topics.battery, @obj.callback_battery);
+ ros2_manager = ROS2Manager('verbose', obj.verbose);
+ ros2_manager = ros2_manager.Initialize();
+ current_ns = ros2_manager.get_namespace();
 
- obj.is_subscribed = true;
- if obj.verbose
- fprintf('[AircraftStateReceiver] topic subscribe complete/done (namespace: /ap)\n');
- end
+ obj.subscriber_node = ros2node('/aircraft_state_receiver');
 
- catch
- % failed available topic namespace 
+ resolved_tf = SimulationConfig.resolve_topic('tf', current_ns);
+ resolved_imu = SimulationConfig.resolve_topic('imu', current_ns);
+ resolved_odom = SimulationConfig.resolve_topic('odometry', current_ns);
+ resolved_gps = SimulationConfig.resolve_topic_if_available('gps', current_ns);
+ resolved_baro = SimulationConfig.resolve_topic('baro', current_ns);
+ resolved_battery = SimulationConfig.resolve_topic('battery', current_ns);
+
+ obj.subscriber_tf = obj.try_subscribe(resolved_tf, 'tf2_msgs/msg/TFMessage', @obj.callback_tf);
+ obj.subscriber_imu = obj.try_subscribe(resolved_imu, 'sensor_msgs/msg/Imu', @obj.callback_imu);
+ obj.subscriber_odometry = obj.try_subscribe(resolved_odom, 'nav_msgs/msg/Odometry', @obj.callback_odom);
+ if ~isempty(resolved_gps)
+	 obj.subscriber_gps = obj.try_subscribe(resolved_gps, 'sensor_msgs/msg/NavSatFix', @obj.callback_gps);
+ end
+ obj.subscriber_baro = obj.try_subscribe(resolved_baro, 'sensor_msgs/msg/FluidPressure', @obj.callback_baro);
+ obj.subscriber_battery = obj.try_subscribe(resolved_battery, 'sensor_msgs/msg/BatteryState', @obj.callback_battery);
+
+ obj.is_subscribed = ~isempty(obj.subscriber_tf) || ~isempty(obj.subscriber_imu) || ...
+ ~isempty(obj.subscriber_gps) || ~isempty(obj.subscriber_baro) || ~isempty(obj.subscriber_battery);
+
  if obj.verbose
- fprintf('[AircraftStateReceiver] namespace /ap subscribe failed, namespace detect ...\n');
+ fprintf('[AircraftStateReceiver] topic subscribe result:\n');
+ fprintf('  TF: %s\n', resolved_tf);
+ fprintf('  IMU: %s\n', resolved_imu);
+ fprintf('  ODOM: %s\n', resolved_odom);
+ if isempty(resolved_gps)
+ fprintf('  GPS: (not published)\n');
+ else
+ fprintf('  GPS: %s\n', resolved_gps);
  end
- try
- [status, out] = system('ros2 topic list 2>/dev/null');
- if status == 0 && ~isempty(out)
- % : '/<ns>/gps' '/<ns>/gps/sample'
- lines = strsplit(out, '\n');
- detected_ns = '';
- for i=1:length(lines)
- line = strtrim(lines{i});
- if contains(line, '/gps')
- % take namespace portion
- parts = strsplit(line, '/');
- if length(parts) >= 2
- detected_ns = ['/' parts{2}];
- break;
- end
- end
- end
- if ~isempty(detected_ns)
- topics = SimulationConfig.get_topics(detected_ns);
- obj.subscriber_tf = ros2subscriber(topics.tf, @obj.callback_tf);
- obj.subscriber_imu = ros2subscriber(topics.imu, @obj.callback_imu);
- obj.subscriber_gps = ros2subscriber(topics.gps, @obj.callback_gps);
- obj.subscriber_baro = ros2subscriber(topics.baro, @obj.callback_baro);
- obj.subscriber_battery = ros2subscriber(topics.battery, @obj.callback_battery);
- obj.is_subscribed = true;
- if obj.verbose
- fprintf('[AircraftStateReceiver] topic subscribe complete/done (detect namespace: %s)\n', detected_ns);
- end
- return;
- end
- end
- catch ME2
- if obj.verbose
- fprintf('[AircraftStateReceiver] namespace detect error: %s\n', ME2.message);
- end
+ fprintf('  BARO: %s\n', resolved_baro);
+ fprintf('  BATTERY: %s\n', resolved_battery);
  end
 
- fprintf('[AircraftStateReceiver] subscribe error: topic .\n');
- obj.is_subscribed = false;
+ if ~obj.is_subscribed
+ fprintf('[AircraftStateReceiver] subscribe error: no topic matched\n');
+ end
  end
  end
  
@@ -177,9 +163,11 @@ classdef AircraftStateReceiver < handle
  
  clear obj.subscriber_tf;
  clear obj.subscriber_imu;
+ clear obj.subscriber_odometry;
  clear obj.subscriber_gps;
  clear obj.subscriber_baro;
  clear obj.subscriber_battery;
+ clear obj.subscriber_node;
  
  obj.is_subscribed = false;
  
@@ -199,6 +187,15 @@ classdef AircraftStateReceiver < handle
  
  methods (Access = private)
  %% 
+
+function sub = try_subscribe(obj, topic_name, message_type, callback_handle)
+ % Try to subscribe to a topic and return [] if it is unavailable.
+ sub = [];
+ try
+	sub = ros2subscriber(obj.subscriber_node, topic_name, message_type, callback_handle);
+ catch
+ end
+ end
  
  function callback_tf(obj, msg)
  % Transform ( / ) 
@@ -252,6 +249,30 @@ classdef AircraftStateReceiver < handle
  catch ME
  if obj.verbose
  fprintf('[AircraftStateReceiver] IMU error: %s\n', ME.message);
+ end
+ end
+
+ function callback_odom(obj, msg)
+ % ODOM
+
+ try
+ obj.current_state.position.x = msg.Pose.Pose.Position.X;
+ obj.current_state.position.y = msg.Pose.Pose.Position.Y;
+ obj.current_state.position.z = msg.Pose.Pose.Position.Z;
+ obj.current_state.position.altitude = msg.Pose.Pose.Position.Z;
+
+ obj.current_state.velocity.vx = msg.Twist.Twist.Linear.X;
+ obj.current_state.velocity.vy = msg.Twist.Twist.Linear.Y;
+ obj.current_state.velocity.vz = msg.Twist.Twist.Linear.Z;
+ obj.current_state.velocity.speed = sqrt(obj.current_state.velocity.vx^2 + obj.current_state.velocity.vy^2 + obj.current_state.velocity.vz^2);
+
+ obj.current_state.timestamp = now;
+ obj.state_updated = true;
+
+ catch ME
+ if obj.verbose
+ fprintf('[AircraftStateReceiver] ODOM error: %s\n', ME.message);
+ end
  end
  end
  end
