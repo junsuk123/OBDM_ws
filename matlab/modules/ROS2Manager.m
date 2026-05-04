@@ -3,7 +3,7 @@
 
 classdef ROS2Manager
  properties (Constant)
- DEFAULT_NAMESPACE = '/ap'; % namespace
+ DEFAULT_NAMESPACE = '/alti_transition'; % namespace
  AUTO_DETECT_TIMEOUT = 5; % detect ( )
  end
  
@@ -140,7 +140,7 @@ classdef ROS2Manager
  
 function topics = get_standard_topics(obj)
 	% Return likely topic names for the detected namespace.
-	% Some simulation setups publish under e.g. '/<ns>/imu' rather than '/<ns>/imu/sample'.
+	% Match the topics actually published by the current ArduPilot + Gazebo bridge.
 	ns = obj.detected_namespace;
 	topics = struct(...
 		'tf', sprintf('%s/tf', ns), ...
@@ -177,6 +177,8 @@ end
  if status == 0
  list = strsplit(output, newline);
  list(cellfun(@isempty, list)) = []; % 
+ system_topics = {'/parameter_events', '/rosout'};
+ list = list(~ismember(list, system_topics));
  else
  list = {};
  end

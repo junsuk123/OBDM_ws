@@ -11,8 +11,36 @@
 
 clear; clc;
 fprintf('\n╔════════════════════════════════════╗\n');
-fprintf('║ 🎯 Integrated Flight Control       ║\n');
+fprintf('║    Integrated Flight Control       ║\n');
 fprintf('╚════════════════════════════════════╝\n\n');
+
+% === Setup environment variables (MATLAB standard per MathWorks) ===
+fprintf('Setting up environment variables...\\n');
+
+% Set ROS Domain ID
+setenv('ROS_DOMAIN_ID', '0');
+fprintf('  ROS_DOMAIN_ID: %s\\n', getenv('ROS_DOMAIN_ID'));
+
+% Set Gazebo version
+setenv('GZ_VERSION', 'harmonic');
+fprintf('  GZ_VERSION: %s\\n', getenv('GZ_VERSION'));
+
+% Set DISPLAY if not already set
+if isempty(getenv('DISPLAY'))
+    setenv('DISPLAY', ':0');
+end
+fprintf('  DISPLAY: %s\\n', getenv('DISPLAY'));
+
+% Propagate X11 auth for GUI apps launched from MATLAB
+xauth_value = getenv('XAUTHORITY');
+if ~isempty(xauth_value)
+    setenv('XAUTHORITY', xauth_value);
+    fprintf('  XAUTHORITY: %s\n', getenv('XAUTHORITY'));
+else
+    fprintf('  XAUTHORITY: (not set)\n');
+end
+
+fprintf('\\n');
 
 % Setup automatic cleanup on exit
 cleanup_obj = onCleanup(@cleanup_on_exit);
@@ -30,6 +58,12 @@ try
     % Create manager instances
     sim = SimulationManager('verbose', true);
     pm = ProcessManager('verbose', true);
+    
+    % Verify workspace configuration
+    if ~sim.verify_workspace()
+        fprintf('\\n⚠️  Warning: Workspace configuration incomplete\\n');
+        fprintf('Attempting to continue anyway...\\n\\n');
+    end
     
     % Cleanup any existing processes
     fprintf('Cleaning up existing processes...\\n');
@@ -62,64 +96,114 @@ try
     topics = sim.get_topics();
     
     try
-        % Subscribe to topics
-        sub_imu = ros2subscriber(topics.imu);
-        sub_gps = ros2subscriber(topics.gps);
-        sub_tf = ros2subscriber(topics.tf);
+        % Create ROS2 node for subscribers
+        node = ros2node("/matlab_data_collector");
         
-        fprintf('Topic subscriptions successful:\\n');
-        fprintf('  ✓ %s\\n', topics.imu);
-        fprintf('  ✓ %s\\n', topics.gps);
-        fprintf('  ✓ %s\\n\\n', topics.tf);
+        % Try to subscribe to each topic individually
+        % Use a permissive QoS so MATLAB can match the ArduPilot bridge publishers.
+        sub_imu = [];
+        sub_odom = [];
+        sub_tf = [];
+        last_imu_stamp = NaN;
+        last_odom_stamp = NaN;
+        last_tf_stamp = NaN;
+        
+        try
+            sub_imu = ros2subscriber(node, topics.imu, 'sensor_msgs/msg/Imu', ...
+                'Reliability', 'besteffort', 'History', 'keepall', 'Depth', 20);
+            fprintf('  ✓ %s\\n', topics.imu);
+        catch ME
+            fprintf('  ✗ %s (unavailable)\\n', topics.imu);
+        end
+        
+        try
+            sub_odom = ros2subscriber(node, topics.odometry, 'nav_msgs/msg/Odometry', ...
+                'Reliability', 'besteffort', 'History', 'keepall', 'Depth', 20);
+            fprintf('  ✓ %s\n', topics.odometry);
+        catch ME
+            fprintf('  ✗ %s (unavailable)\n', topics.odometry);
+        end
+        
+        try
+            sub_tf = ros2subscriber(node, topics.tf, 'tf2_msgs/msg/TFMessage', ...
+                'Reliability', 'besteffort', 'History', 'keepall', 'Depth', 20);
+            fprintf('  ✓ %s\\n', topics.tf);
+        catch ME
+            fprintf('  ✗ %s (unavailable)\\n', topics.tf);
+        end
+        fprintf('\\n');
         
         % Collect data for 10 seconds
-        data_log = struct('imu', [], 'gps', [], 'tf', []);
+        data_log = struct('imu', [], 'odom', [], 'tf', []);
         
         for t = 1:10
-            % Try to receive IMU data
-            try
-                msg = receive(sub_imu, 1);
-                if ~isempty(msg)
-                    data_log.imu = [data_log.imu; msg.LinearAcceleration.X, msg.LinearAcceleration.Y, msg.LinearAcceleration.Z];
+            % Read the latest IMU sample without blocking.
+            if ~isempty(sub_imu)
+                try
+                    [msg, status] = receive(sub_imu, 0.5);
+                    if status && ~isempty(msg)
+                        stamp = double(msg.Header.Stamp.Sec) + double(msg.Header.Stamp.Nanosec) * 1e-9;
+                        if isnan(last_imu_stamp) || stamp ~= last_imu_stamp
+                            data_log.imu = [data_log.imu; msg.LinearAcceleration.X, msg.LinearAcceleration.Y, msg.LinearAcceleration.Z];
+                            last_imu_stamp = stamp;
+                        end
+                    end
+                catch
                 end
-            catch
             end
             
-            % Try to receive GPS data
-            try
-                msg = receive(sub_gps, 1);
-                if ~isempty(msg)
-                    data_log.gps = [data_log.gps; msg.Latitude, msg.Longitude, msg.Altitude];
+            % Read the latest odometry sample without blocking.
+            if ~isempty(sub_odom)
+                try
+                    [msg, status] = receive(sub_odom, 0.5);
+                    if status && ~isempty(msg)
+                        stamp = double(msg.Header.Stamp.Sec) + double(msg.Header.Stamp.Nanosec) * 1e-9;
+                        if isnan(last_odom_stamp) || stamp ~= last_odom_stamp
+                            data_log.odom = [data_log.odom; msg.Pose.Pose.Position.X, msg.Pose.Pose.Position.Y, msg.Pose.Pose.Position.Z];
+                            last_odom_stamp = stamp;
+                        end
+                    end
+                catch
                 end
-            catch
             end
             
-            % Try to receive TF data
-            try
-                msg = receive(sub_tf, 1);
-                if ~isempty(msg) && ~isempty(msg.Transforms)
-                    tf = msg.Transforms(1);
-                    data_log.tf = [data_log.tf; tf.Transform.Translation.X, tf.Transform.Translation.Y, tf.Transform.Translation.Z];
+            % Read the latest TF sample without blocking.
+            if ~isempty(sub_tf)
+                try
+                    [msg, status] = receive(sub_tf, 0.5);
+                    if status && ~isempty(msg) && ~isempty(msg.Transforms)
+                        tf = msg.Transforms(1);
+                        stamp = double(tf.Header.Stamp.Sec) + double(tf.Header.Stamp.Nanosec) * 1e-9;
+                        if isnan(last_tf_stamp) || stamp ~= last_tf_stamp
+                            data_log.tf = [data_log.tf; tf.Transform.Translation.X, tf.Transform.Translation.Y, tf.Transform.Translation.Z];
+                            last_tf_stamp = stamp;
+                        end
+                    end
+                catch
                 end
-            catch
             end
             
-            fprintf('[%2d/10] IMU: %d messages, GPS: %d messages, TF: %d messages\\n', ...
-                t, size(data_log.imu, 1), size(data_log.gps, 1), size(data_log.tf, 1));
+            fprintf('[%2d/10] IMU: %d messages, ODOM: %d messages, TF: %d messages\n', ...
+                t, size(data_log.imu, 1), size(data_log.odom, 1), size(data_log.tf, 1));
             pause(1);
         end
         
         % Display data statistics
         fprintf('\\nData Collection Summary:\\n');
         fprintf('  IMU messages: %d\\n', size(data_log.imu, 1));
-        fprintf('  GPS messages: %d\\n', size(data_log.gps, 1));
+        fprintf('  ODOM messages: %d\n', size(data_log.odom, 1));
         fprintf('  TF messages: %d\\n', size(data_log.tf, 1));
         
-        % Cleanup subscribers
-        clear sub_imu sub_gps sub_tf;
+        % Cleanup subscribers and node
+        clear sub_imu sub_odom sub_tf node;
         
     catch ME
         fprintf('Data collection error: %s\\n', ME.message);
+        % Cleanup on error
+        try
+            clear sub_imu sub_odom sub_tf node;
+        catch
+        end
     end
     
     % ====== 5. Final Status ======
@@ -157,153 +241,4 @@ function cleanup_on_exit()
     end
     
     fprintf('✓ Cleanup complete\\n\\n');
-end
-
-fprintf('\n╔════════════════════════════════════╗\n');
-fprintf('║ 🎯 simulation control () ║\n');
-fprintf('╚════════════════════════════════════╝\n\n');
-
-% cleanup set ( terminate )
-cleanup_obj = onCleanup(@cleanup_on_exit);
-
-try
- % ====== 1. Initialize ======
- fprintf('═════════════════════════════════════\n');
- fprintf('1️⃣ Initialize \n');
- fprintf('═════════════════════════════════════\n\n');
- 
- % add (main matlab add)
- matlab_root = fileparts(fileparts(mfilename('fullpath'))); % main 
- addpath(genpath(matlab_root));
- 
- % Manager 
- sim = SimulationManager('verbose', true);
- pm = ProcessManager('verbose', true);
- 
- % process cleanup
- fprintf(' process cleanup...\n');
- pm = pm.cleanup_all_simulation();
- pause(1);
- 
- % simulation Initialize
- fprintf('\nsimulation Manager Initialize...\n');
- sim = sim.Initialize();
- 
- % ====== 2. simulation Start ======
- fprintf('\n═════════════════════════════════════\n');
- fprintf('2️⃣ simulation Start\n');
- fprintf('═════════════════════════════════════\n\n');
- 
- sim = sim.start_simulation('auto_launch', true, 'wait_for_topics', true);
- 
- % ====== 3. ROS2 Connection check ======
- fprintf('\n═════════════════════════════════════\n');
- fprintf('3️⃣ ROS2 Connection check\n');
- fprintf('═════════════════════════════════════\n\n');
- 
- sim.ros2_manager.print_info();
- 
- % ====== 4. Data Receive ======
- fprintf('═════════════════════════════════════\n');
- fprintf('4️⃣ Data Receive (10)\n');
- fprintf('═════════════════════════════════════\n\n');
- 
- topics = sim.get_topics();
- 
- try
- % subscribe set
- sub_imu = ros2subscriber(topics.imu);
- sub_gps = ros2subscriber(topics.gps);
- sub_tf = ros2subscriber(topics.tf);
- 
- fprintf('Topic subscribe success:\n');
- fprintf(' ✓ %s\n', topics.imu);
- fprintf(' ✓ %s\n', topics.gps);
- fprintf(' ✓ %s\n\n', topics.tf);
- 
- % 10 Data Receive
- data_log = struct('imu', [], 'gps', [], 'tf', []);
- 
- for t = 1:10
- % IMU Data
- try
- msg = receive(sub_imu, 1);
- if ~isempty(msg)
- data_log.imu = [data_log.imu; msg.LinearAcceleration.X, msg.LinearAcceleration.Y, msg.LinearAcceleration.Z];
- end
- catch
- end
- 
- % GPS Data
- try
- msg = receive(sub_gps, 1);
- if ~isempty(msg)
- data_log.gps = [data_log.gps; msg.Latitude, msg.Longitude, msg.Altitude];
- end
- catch
- end
- 
- % TF Data
- try
- msg = receive(sub_tf, 1);
- if ~isempty(msg) && ~isempty(msg.Transforms)
- tf = msg.Transforms(1);
- data_log.tf = [data_log.tf; tf.Transform.Translation.X, tf.Transform.Translation.Y, tf.Transform.Translation.Z];
- end
- catch
- end
- 
- fprintf('[%2d/10] IMU: %d, GPS: %d, TF: %d\n', ...
- t, size(data_log.imu, 1), size(data_log.gps, 1), size(data_log.tf, 1));
- pause(1);
- end
- 
- % 
- fprintf('\nData complete:\n');
- fprintf(' IMU : %d\n', size(data_log.imu, 1));
- fprintf(' GPS : %d\n', size(data_log.gps, 1));
- fprintf(' TF : %d\n', size(data_log.tf, 1));
- 
- % cleanup
- clear sub_imu sub_gps sub_tf;
- 
- catch ME
- fprintf('Data Receive error: %s\n', ME.message);
- end
- 
- % ====== 5. ======
- fprintf('\n═════════════════════════════════════\n');
- fprintf('5️⃣ \n');
- fprintf('═════════════════════════════════════\n\n');
- 
- sim.print_status();
- 
- % ====== 6. terminate ======
- fprintf('═════════════════════════════════════\n');
- fprintf('✓ complete\n');
- fprintf('═════════════════════════════════════\n\n');
- 
-catch ME
- fprintf('\n✗ error !\n');
- fprintf(': %s\n', ME.message);
- fprintf('\n :\n');
- disp(ME.stack);
-end
-
-% ====== cleanup ======
-function cleanup_on_exit()
- fprintf('\n╔════════════════════════════════════╗\n');
- fprintf('║ terminate - cleanup... ║\n');
- fprintf('╚════════════════════════════════════╝\n\n');
- 
- try
- % ProcessManager terminate
- pm = ProcessManager('verbose', true);
- pm = pm.cleanup_all_simulation();
- pm.print_cleanup_log();
- catch ME
- fprintf('cleanup error: %s\n', ME.message);
- end
- 
- fprintf('✓ terminate\n\n');
 end

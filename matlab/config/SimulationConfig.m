@@ -19,9 +19,10 @@ classdef SimulationConfig
  % ROS2 topic set
  TOPICS = struct(...
  'tf', '/ap/tf', ... % / 
- 'imu', '/ap/imu/sample', ... % IMU 
- 'gps', '/ap/gps/sample', ... % GPS
- 'baro', '/ap/baro/sample', ... % 
+ 'imu', '/ap/imu', ... % IMU 
+ 'odometry', '/ap/odometry', ... % odometry 
+ 'gps', '/ap/gps', ... % GPS
+ 'baro', '/ap/baro', ... % 
  'battery', '/ap/battery/state' ... % 
  );
  
@@ -104,9 +105,10 @@ classdef SimulationConfig
 
  topics = struct();
  topics.tf = [ns '/tf'];
- topics.imu = [ns '/imu/sample'];
- topics.gps = [ns '/gps/sample'];
- topics.baro = [ns '/baro/sample'];
+	 topics.imu = [ns '/imu'];
+	 topics.odometry = [ns '/odometry'];
+	 topics.gps = [ns '/gps'];
+	 topics.baro = [ns '/baro'];
  topics.battery = [ns '/battery/state'];
  end
  
