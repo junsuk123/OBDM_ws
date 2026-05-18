@@ -98,6 +98,23 @@ try
     
     ns = sim.get_namespace();
     fprintf('✓ Simulation ready. Namespace: %s\n', ns);
+
+    % Optional: auto-publish a single wind command from MATLAB for testing.
+    % Enable by setting environment variable OBDM_AUTO_PUBLISH_WIND=1
+    try
+        if strcmpi(getenv('OBDM_AUTO_PUBLISH_WIND'), '1')
+            try
+                wc = WindControlModule('namespace', ns);
+                preset = getenv('OBDM_WIND_PRESET');
+                if isempty(preset), preset = 'safe'; end
+                fprintf('[integrated_main] Auto-publishing wind preset: %s\n', preset);
+                wc.publishOnce(wc.presetToMsg(preset));
+            catch ME
+                fprintf('[integrated_main] Warning: Auto wind publish failed: %s\n', ME.message);
+            end
+        end
+    catch
+    end
     
     % Extra wait for full simulation initialization
     % ArduPilot and Gazebo bridge need time to establish JSON sensor communication
@@ -123,11 +140,19 @@ try
 
     % Start data logger (separate from visualizer for independent operation)
     data_logger = [];
+    wind_control = [];
     try
         data_logger = DataLogger('namespace', ns, 'verbose', true);
         data_logger.start_background(0.5);
-        if obj.verbose
-            fprintf('[integrated_main] Data logger started (saving to matlab/data/test/<timestamp>/)\n');
+        fprintf('[integrated_main] Data logger started (saving to matlab/data/test/<timestamp>/)\n');
+        
+        % Auto-start wind publishing for data collection
+        try
+            wind_control = WindControlModule('namespace', ns);
+            wind_control.startPeriodic('safe', 1.0);
+            fprintf('[integrated_main] Wind publishing started for data collection\n');
+        catch ME
+            fprintf('[integrated_main] Warning: Could not start wind publishing: %s\n', ME.message);
         end
     catch ME
         fprintf('[integrated_main] Warning: DataLogger failed to start: %s\n', ME.message);
@@ -137,7 +162,6 @@ try
     vis = [];
     try
         vis = RealtimeVisualizer('namespace', ns, 'verbose', true);
-        vis.init();
         vis.start_background(0.5);
     catch
         fprintf('[integrated_main] Warning: RealtimeVisualizer failed to start\n');

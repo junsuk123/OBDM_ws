@@ -8,6 +8,9 @@ classdef RealtimeVisualizer < handle
         sub_odom
         sub_wind
         fig
+        ax_traj
+        ax_wind
+        ax_status
         h_traj
         h_wind
         h_status
@@ -93,24 +96,24 @@ classdef RealtimeVisualizer < handle
                 tiledlayout(1,3);
                 
                 % Trajectory plot
-                ax1 = nexttile;
-                obj.h_traj = plot3(ax1, NaN, NaN, NaN, '-b', 'LineWidth', 1.5);
-                hold(ax1,'on'); grid(ax1,'on'); view(ax1,3);
-                xlabel(ax1, 'X (m)'); ylabel(ax1, 'Y (m)'); zlabel(ax1, 'Z (m)');
-                title(ax1, 'Vehicle trajectory');
+                obj.ax_traj = nexttile;
+                obj.h_traj = plot3(obj.ax_traj, NaN, NaN, NaN, '-b', 'LineWidth', 1.5);
+                hold(obj.ax_traj,'on'); grid(obj.ax_traj,'on'); view(obj.ax_traj,3);
+                xlabel(obj.ax_traj, 'X (m)'); ylabel(obj.ax_traj, 'Y (m)'); zlabel(obj.ax_traj, 'Z (m)');
+                title(obj.ax_traj, 'Vehicle trajectory');
                 
                 % Wind magnitude plot
-                ax2 = nexttile;
-                obj.h_wind = plot(ax2, NaN, NaN, '-r', 'LineWidth', 1.5);
-                grid(ax2,'on'); xlabel(ax2,'Time (s)'); ylabel(ax2,'Wind magnitude (m/s)');
-                title(ax2,'Wind magnitude over time');
+                obj.ax_wind = nexttile;
+                obj.h_wind = plot(obj.ax_wind, NaN, NaN, '-r', 'LineWidth', 1.5);
+                grid(obj.ax_wind,'on'); xlabel(obj.ax_wind,'Time (s)'); ylabel(obj.ax_wind,'Wind magnitude (m/s)');
+                title(obj.ax_wind,'Wind magnitude over time');
                 
                 % Status plot (text display)
-                ax3 = nexttile;
-                axis(ax3, 'off');
-                obj.h_status = text(ax3, 0.1, 0.9, '', 'VerticalAlignment', 'top', ...
+                obj.ax_status = nexttile;
+                axis(obj.ax_status, 'off');
+                obj.h_status = text(obj.ax_status, 0.1, 0.9, '', 'VerticalAlignment', 'top', ...
                     'FontFamily', 'monospace', 'FontSize', 10);
-                title(ax3, 'Status & Diagnostics');
+                title(obj.ax_status, 'Status & Diagnostics');
 
             catch ME
                 warning('[RealtimeVisualizer] init failed: %s', ME.message);
@@ -204,6 +207,8 @@ classdef RealtimeVisualizer < handle
                         end
                         if ~isempty(obj.wind_history)
                             set(obj.h_wind, 'XData', obj.wind_time, 'YData', obj.wind_history);
+                            % Auto-scale wind plot axes
+                            axis(obj.ax_wind, 'auto');
                         end
                         
                         % Update status text
