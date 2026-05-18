@@ -140,11 +140,19 @@ try
 
     % Start data logger (separate from visualizer for independent operation)
     data_logger = [];
+    wind_control = [];
     try
         data_logger = DataLogger('namespace', ns, 'verbose', true);
         data_logger.start_background(0.5);
-        if obj.verbose
-            fprintf('[integrated_main] Data logger started (saving to matlab/data/test/<timestamp>/)\n');
+        fprintf('[integrated_main] Data logger started (saving to matlab/data/test/<timestamp>/)\n');
+        
+        % Auto-start wind publishing for data collection
+        try
+            wind_control = WindControlModule('namespace', ns);
+            wind_control.startPeriodic('safe', 1.0);
+            fprintf('[integrated_main] Wind publishing started for data collection\n');
+        catch ME
+            fprintf('[integrated_main] Warning: Could not start wind publishing: %s\n', ME.message);
         end
     catch ME
         fprintf('[integrated_main] Warning: DataLogger failed to start: %s\n', ME.message);
@@ -154,7 +162,6 @@ try
     vis = [];
     try
         vis = RealtimeVisualizer('namespace', ns, 'verbose', true);
-        vis.init();
         vis.start_background(0.5);
     catch
         fprintf('[integrated_main] Warning: RealtimeVisualizer failed to start\n');
