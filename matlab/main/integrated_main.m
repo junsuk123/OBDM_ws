@@ -121,7 +121,20 @@ try
     collector.print_summary(data);
     collector.unsubscribe_from_topics();
 
+    % Start data logger (separate from visualizer for independent operation)
+    data_logger = [];
+    try
+        data_logger = DataLogger('namespace', ns, 'verbose', true);
+        data_logger.start_background(0.5);
+        if obj.verbose
+            fprintf('[integrated_main] Data logger started (saving to matlab/data/test/<timestamp>/)\n');
+        end
+    catch ME
+        fprintf('[integrated_main] Warning: DataLogger failed to start: %s\n', ME.message);
+    end
+
     % Start realtime visualizer in background to monitor odom and wind
+    vis = [];
     try
         vis = RealtimeVisualizer('namespace', ns, 'verbose', true);
         vis.init();
@@ -229,6 +242,25 @@ try
         fprintf('[integrated_main] Landing helper failed: %s\n', ME.message);
     end
 
+    % Clean up visualizer and data logger
+    try
+        if exist('vis', 'var') && ~isempty(vis)
+            vis.stop();
+            fprintf('[integrated_main] Visualizer stopped\n');
+        end
+    catch ME
+        fprintf('[integrated_main] Visualizer cleanup warning: %s\n', ME.message);
+    end
+    
+    try
+        if exist('data_logger', 'var') && ~isempty(data_logger)
+            data_logger.cleanup();
+            fprintf('[integrated_main] Data logger cleaned up\n');
+        end
+    catch ME
+        fprintf('[integrated_main] Data logger cleanup warning: %s\n', ME.message);
+    end
+
     fprintf('\n═════════════════════════════════════\n');
     fprintf('✓ Integration test complete\n');
     fprintf('═════════════════════════════════════\n\n');
@@ -239,6 +271,20 @@ catch ME
     fprintf('\n✗ Error: %s\n', ME.message);
     fprintf('Stack trace:\n');
     disp(ME.stack);
+    
+    % Emergency cleanup on exception
+    try
+        if exist('vis', 'var') && ~isempty(vis)
+            vis.stop();
+        end
+    catch
+    end
+    try
+        if exist('data_logger', 'var') && ~isempty(data_logger)
+            data_logger.cleanup();
+        end
+    catch
+    end
 end
 
 function cleanup_on_exit()
