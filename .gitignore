@@ -1,0 +1,26 @@
+## MATLAB
+*.asv
+*.m~
+*.mex*
+*.p
+.mat
+.fig
+/.history
+
+## Logs and runtime
+/logs/
+/tmp/
+*.log
+*.tlog*
+eeprom.bin
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Python/Other
+__pycache__/
+.pytest_cache/
+
+## Node
+node_modules/

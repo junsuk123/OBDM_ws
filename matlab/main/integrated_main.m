@@ -98,6 +98,23 @@ try
     
     ns = sim.get_namespace();
     fprintf('✓ Simulation ready. Namespace: %s\n', ns);
+
+    % Optional: auto-publish a single wind command from MATLAB for testing.
+    % Enable by setting environment variable OBDM_AUTO_PUBLISH_WIND=1
+    try
+        if strcmpi(getenv('OBDM_AUTO_PUBLISH_WIND'), '1')
+            try
+                wc = WindControlModule('namespace', ns);
+                preset = getenv('OBDM_WIND_PRESET');
+                if isempty(preset), preset = 'safe'; end
+                fprintf('[integrated_main] Auto-publishing wind preset: %s\n', preset);
+                wc.publishOnce(wc.presetToMsg(preset));
+            catch ME
+                fprintf('[integrated_main] Warning: Auto wind publish failed: %s\n', ME.message);
+            end
+        end
+    catch
+    end
     
     % Extra wait for full simulation initialization
     % ArduPilot and Gazebo bridge need time to establish JSON sensor communication
