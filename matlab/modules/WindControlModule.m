@@ -1,5 +1,5 @@
 classdef WindControlModule < handle
-    % WindControlModule Publish simple wind commands for runtime testing.
+    % WindControlModule Publish simple Gazebo wind commands for runtime testing.
     % Usage:
     %  wc = WindControlModule('nodeName','/wind_ctrl');
     %  wc.setPreset('safe'); wc.publishOnce();
@@ -37,52 +37,29 @@ classdef WindControlModule < handle
                 obj.Namespace = obj.Namespace(1:end-1);
             end
 
-            obj.Node = ros2node(nodeName);
-            % Publish directly using ros_gz_interfaces/Float32Array so the
-            % ros_gz_bridge can map it to Gazebo messages without an extra node.
-            topic = sprintf('%s/wind_command_az', obj.Namespace);
-            try
-                obj.Pub = ros2publisher(obj.Node, topic, 'ros_gz_interfaces/Float32Array');
-                fprintf('[WindControlModule] Publisher created on topic: %s\n', topic);
-            catch ME
-                warning('[WindControlModule] Failed to create publisher on %s: %s', topic, ME.message);
-                % Fallback to global topic
-                try
-                    obj.Pub = ros2publisher(obj.Node, '/wind_command_az', 'ros_gz_interfaces/Float32Array');
-                    fprintf('[WindControlModule] Fallback publisher created on /wind_command_az\n');
-                catch
-                    obj.Pub = [];
-                end
-            end
+            obj.Node = [];
+            obj.Pub = [];
+            topic = sprintf('/world/%s/wind', obj.WorldName);
+            fprintf('[WindControlModule] Using Gazebo CLI wind publishing on topic: %s\n', topic);
 
             obj.LastPreset = '';
         end
 
-        function publishOnce(obj, msgArray)
+        function publishOnce(obj, windVector)
             if nargin < 2
-                msgArray = obj.presetToMsg('safe');
+                windVector = obj.presetToMsg('safe');
             end
-            % Ensure numeric array (double/single)
-            arr = double(msgArray);
-
-            % Try ROS2 publisher first if available
-            if ~isempty(obj.Pub)
-                try
-                    m = ros2message('ros_gz_interfaces/Float32Array');
-                    m.data = arr;
-                    send(obj.Pub,m);
-                    return;
-                catch ME
-                    warning('[WindControlModule] ROS publish failed: %s', ME.message);
-                end
+            windVector = double(windVector);
+            if numel(windVector) < 3
+                warning('[WindControlModule] Wind vector must contain [x y z] in m/s');
+                return;
             end
 
-            % Fallback: publish directly to gz topic using the bridge-matched
-            % gz.msgs.Float_V payload expected by /world/<world>/wind.
             try
-                payload = sprintf('data: [%s]', strjoin(arrayfun(@(v) num2str(v, '%.9g'), arr, 'UniformOutput', false), ', '));
                 topic = sprintf('/world/%s/wind', obj.WorldName);
-                cmd = sprintf('GZ_VERSION=harmonic gz topic -t "%s" -m gz.msgs.Float_V -p "%s"', topic, payload);
+                payload = sprintf('linear_velocity: {x: %.9g, y: %.9g, z: %.9g} enable_wind: true', ...
+                    windVector(1), windVector(2), windVector(3));
+                cmd = sprintf('GZ_VERSION=harmonic gz topic -t "%s" -m gz.msgs.Wind -p "%s"', topic, payload);
                 if ispc
                     % Windows not supported for gz CLI in this environment
                     warning('[WindControlModule] Direct gz publish not supported on Windows');
@@ -111,18 +88,18 @@ classdef WindControlModule < handle
         end
 
         function msg = presetToMsg(~, preset)
-            % Return Float32 array: [enable, wind_x, wind_y, wind_z, horiz_noise, vert_noise, dir_var, mag_var, period, rise_time]
+            % Return steady wind vector [x y z] in world-frame m/s.
             switch lower(preset)
                 case {'calm','none'}
-                    msg = single([1, 0.5, 0, 0, 0.01, 0.0, 0.01, 0.01, 30, 10]);
+                    msg = single([0.5, 0, 0]);
                 case 'safe'
-                    msg = single([1, 1.5, 0, 0, 0.02, 0.01, 0.05, 0.05, 30, 10]);
+                    msg = single([1.5, 0, 0]);
                 case 'boundary'
-                    msg = single([1, 4.0, 0, 0, 0.07, 0.04, 0.17, 0.15, 15, 5]);
+                    msg = single([4.0, 0, 0]);
                 case 'dangerous'
-                    msg = single([1, 6.5, 0, 0, 0.15, 0.08, 0.35, 0.25, 6, 3]);
+                    msg = single([6.5, 0, 0]);
                 otherwise
-                    msg = single([1, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0]);
+                    msg = single([0, 0, 0]);
             end
         end
 
@@ -131,7 +108,6 @@ classdef WindControlModule < handle
                 obj.stopPeriodic();
             catch
             end
-            try delete(obj.Node); catch; end
         end
     end
 end

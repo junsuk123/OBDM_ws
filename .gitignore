@@ -10,6 +10,18 @@
 ## Logs and runtime
 /logs/
 /tmp/
+matlab/logs/
+matlab/home/
+matlab/matlab/data/test/
+matlab/main/home/
+matlab/main/logs/
+matlab/main/matlab/data/test/
+matlab/main/*.BIN
+matlab/main/*.tlog*
+matlab/main/eeprom.bin
+matlab/modules/*.tlog*
+matlab/modules/eeprom.bin
+scripts/__pycache__/
 *.log
 *.tlog*
 eeprom.bin

@@ -131,11 +131,11 @@ classdef CircleControlModule < handle
             end
         end
         function success = execute_circle_flight(obj, varargin)
-            % 원형 비행 제어 실행
+            % 복합 코스 비행 제어 실행
             % 입력:
-            %   'radius_m' - 원의 반지름 (기본값: 100)
+            %   'radius_m' - legacy circle radius / curved return radius hint
             %   'altitude_agl_m' - 고도 AGL (기본값: 30)
-            %   'num_points' - 원 상의 웨이포인트 개수 (기본값: 36)
+            %   'num_points' - legacy waypoint count
             %   'tolerance_m' - 도달 허용오차 (기본값: 30)
             %   'waypoint_timeout_s' - 웨이포인트별 타임아웃 (기본값: 20)
             
@@ -155,6 +155,19 @@ classdef CircleControlModule < handle
             addParameter(p, 'hover_duration_s', 10, @isnumeric);
             addParameter(p, 'hover_tolerance_m', 5, @isnumeric);
             addParameter(p, 'sample_interval_s', 0.5, @isnumeric);
+            addParameter(p, 'course_type', 'wind_test', @ischar);
+            addParameter(p, 'straight_length_m', 35, @isnumeric);
+            addParameter(p, 'climb_height_m', 8, @isnumeric);
+            addParameter(p, 'descent_forward_m', 35, @isnumeric);
+            addParameter(p, 'descent_lateral_m', 18, @isnumeric);
+            addParameter(p, 'straight_points', 6, @isnumeric);
+            addParameter(p, 'climb_points', 4, @isnumeric);
+            addParameter(p, 'descent_points', 6, @isnumeric);
+            addParameter(p, 'return_curve_points', 12, @isnumeric);
+            addParameter(p, 'waypoint_spacing_m', 4, @isnumeric);
+            addParameter(p, 'smooth_interpolation', true, @islogical);
+            addParameter(p, 'land_at_end', true, @islogical);
+            addParameter(p, 'landing_timeout_s', 45, @isnumeric);
             parse(p, varargin{:});
             
             radius_m = p.Results.radius_m;
@@ -165,6 +178,9 @@ classdef CircleControlModule < handle
             hover_duration_s = p.Results.hover_duration_s;
             hover_tolerance_m = p.Results.hover_tolerance_m;
             sample_interval_s = p.Results.sample_interval_s;
+            course_type = p.Results.course_type;
+            land_at_end = p.Results.land_at_end;
+            landing_timeout_s = p.Results.landing_timeout_s;
 
             obj.flight_log = obj.create_empty_flight_log();
             obj.control_start_tic = tic;
@@ -284,21 +300,41 @@ classdef CircleControlModule < handle
                     fprintf('[CircleControlModule] Hover drift: max=%.1f m, final=%.1f m\n', hover_stats.max_error_m, hover_stats.final_error_m);
                 end
                 
-                % PHASE 5: Build circle trajectory
+                % PHASE 5: Build wind-test trajectory
                 if obj.verbose
-                    fprintf('[CircleControlModule] Building circle trajectory (radius=%.1f m, points=%d)...\n', radius_m, num_points);
+                    fprintf('[CircleControlModule] Building %s trajectory...\n', course_type);
                 end
-                if use_geo_reference
-                    [waypoints, waypoints_local] = obj.build_circle_waypoints(lat0, lon0, target_alt, radius_m, num_points);
+                if strcmpi(course_type, 'circle')
+                    if use_geo_reference
+                        [waypoints, waypoints_local] = obj.build_circle_waypoints(lat0, lon0, target_alt, radius_m, num_points);
+                    else
+                        [waypoints, waypoints_local] = obj.build_circle_waypoints_local(home_x, home_y, target_alt, radius_m, num_points);
+                    end
                 else
-                    [waypoints, waypoints_local] = obj.build_circle_waypoints_local(home_x, home_y, target_alt, radius_m, num_points);
+                    if use_geo_reference
+                        [waypoints, waypoints_local] = obj.build_wind_test_course_waypoints( ...
+                            lat0, lon0, target_alt, ...
+                            p.Results.straight_length_m, p.Results.climb_height_m, ...
+                            p.Results.descent_forward_m, p.Results.descent_lateral_m, ...
+                            p.Results.straight_points, p.Results.climb_points, ...
+                            p.Results.descent_points, p.Results.return_curve_points, ...
+                            p.Results.waypoint_spacing_m, p.Results.smooth_interpolation);
+                    else
+                        [waypoints, waypoints_local] = obj.build_wind_test_course_waypoints_local( ...
+                            home_x, home_y, target_alt, ...
+                            p.Results.straight_length_m, p.Results.climb_height_m, ...
+                            p.Results.descent_forward_m, p.Results.descent_lateral_m, ...
+                            p.Results.straight_points, p.Results.climb_points, ...
+                            p.Results.descent_points, p.Results.return_curve_points, ...
+                            p.Results.waypoint_spacing_m, p.Results.smooth_interpolation);
+                    end
                 end
                 obj.last_waypoints = waypoints;
                 obj.last_waypoints_local = waypoints_local;
                 
-                % PHASE 6: Follow circle path
+                % PHASE 6: Follow planned path
                 if obj.verbose
-                    fprintf('[CircleControlModule] Following circle path (%d waypoints)...\n', size(waypoints, 1));
+                    fprintf('[CircleControlModule] Following planned path (%d waypoints)...\n', size(waypoints, 1));
                 end
                 reached_count = 0;
                 for i = 1:size(waypoints, 1)
@@ -330,25 +366,30 @@ classdef CircleControlModule < handle
                     end
                     pause(1.0);
                 end
-                % PHASE 7: Return home and disarm
+                % PHASE 7: Return home, land, and disarm
                 if obj.verbose
-                    fprintf('[CircleControlModule] Returning to home and disarming...\n');
+                    fprintf('[CircleControlModule] Returning to home before landing...\n');
                 end
                 if use_geo_reference
                     obj.publish_goal(lat0, lon0, target_alt);
                     obj.record_flight_sample('return_home', lat0, lon0, target_alt);
+                    obj.wait_until_close(lat0, lon0, target_alt, tolerance_m, waypoint_timeout_s, 'return_home');
                 else
                     obj.publish_goal_local(home_x, home_y, target_alt);
                     obj.record_flight_sample('return_home', home_x, home_y, target_alt);
+                    obj.wait_until_close_local(home_x, home_y, target_alt, tolerance_m, waypoint_timeout_s, 'return_home');
                 end
-                pause(3.0);
+
+                if land_at_end
+                    obj.land_and_disarm(alt0, landing_timeout_s);
+                else
+                    obj.arm_vehicle(false);
+                end
                 
-                obj.arm_vehicle(false);
-                
-                success = (reached_count / size(waypoints, 1)) > 0.8;
+                success = (reached_count / size(waypoints, 1)) > 0.7;
                 
                 if obj.verbose
-                    fprintf('[CircleControlModule] Circle flight complete (reached %d/%d waypoints)\n', reached_count, size(waypoints, 1));
+                    fprintf('[CircleControlModule] Planned flight complete (reached %d/%d waypoints)\n', reached_count, size(waypoints, 1));
                 end
                 
             catch ME
@@ -461,6 +502,76 @@ classdef CircleControlModule < handle
             elapsed = toc(t0);
             fprintf('[CircleControlModule] WARNING: timed out waiting for altitude (max reached: %.1f m, target: %.1f m, %.1f / %.1f seconds); continuing anyway\n', max_altitude_seen, target_alt, elapsed, timeout_s);
         end
+
+        function ok = land_and_disarm(obj, home_alt, timeout_s)
+            ok = false;
+            if nargin < 3 || isempty(timeout_s)
+                timeout_s = 45;
+            end
+
+            if obj.verbose
+                fprintf('[CircleControlModule] Switching to LAND mode...\n');
+            end
+
+            land_mode_ok = obj.switch_mode('LAND');
+            if ~land_mode_ok
+                fprintf('[CircleControlModule] Warning: LAND mode command was not confirmed; monitoring descent anyway\n');
+            end
+
+            landed = obj.wait_until_landed(home_alt, timeout_s);
+            if ~landed
+                fprintf('[CircleControlModule] Warning: landing timeout; attempting disarm only after best-effort landing wait\n');
+            end
+
+            ok = obj.arm_vehicle(false);
+            if obj.verbose
+                fprintf('[CircleControlModule] Landing sequence complete: landed=%s, disarm=%s\n', ...
+                    obj.status_str(landed), obj.status_str(ok));
+            end
+        end
+
+        function landed = wait_until_landed(obj, home_alt, timeout_s)
+            landed = false;
+            t0 = tic;
+            below_threshold_count = 0;
+            if nargin < 2 || ~isfinite(home_alt)
+                home_alt = 0;
+            end
+
+            while toc(t0) < timeout_s
+                state = obj.receiver.get_current_state();
+                obj.record_flight_sample('landing', NaN, NaN, home_alt);
+
+                current_alt = NaN;
+                if isfield(state, 'position')
+                    if isfield(state.position, 'altitude') && isfinite(state.position.altitude)
+                        current_alt = state.position.altitude;
+                    elseif isfield(state.position, 'z') && isfinite(state.position.z)
+                        current_alt = state.position.z;
+                    end
+                end
+
+                agl_est = abs(current_alt - home_alt);
+                if isfinite(agl_est) && agl_est <= 0.35
+                    below_threshold_count = below_threshold_count + 1;
+                else
+                    below_threshold_count = 0;
+                end
+
+                if obj.verbose
+                    fprintf('  Landing: alt=%.2f m, home=%.2f m, agl_est=%.2f m\n', current_alt, home_alt, agl_est);
+                end
+
+                if below_threshold_count >= 4
+                    landed = true;
+                    if obj.verbose
+                        fprintf('[CircleControlModule] Landing altitude threshold reached\n');
+                    end
+                    return;
+                end
+                pause(0.5);
+            end
+        end
         
         function [waypoints, waypoints_local] = build_circle_waypoints(obj, lat0, lon0, alt, radius_m, num_points)
             waypoints = [];
@@ -498,6 +609,126 @@ classdef CircleControlModule < handle
                 waypoints = [waypoints; x, y, alt]; %#ok<AGROW>
                 waypoints_local = [waypoints_local; x, y, alt]; %#ok<AGROW>
             end
+        end
+
+        function [waypoints, waypoints_local] = build_wind_test_course_waypoints(obj, lat0, lon0, base_alt, straight_length_m, climb_height_m, descent_forward_m, descent_lateral_m, straight_points, climb_points, descent_points, return_curve_points, waypoint_spacing_m, smooth_interpolation)
+            local_points = obj.build_wind_test_course_local_offsets( ...
+                base_alt, straight_length_m, climb_height_m, descent_forward_m, descent_lateral_m, ...
+                straight_points, climb_points, descent_points, return_curve_points, ...
+                waypoint_spacing_m, smooth_interpolation);
+
+            deg_per_m_lat = 1 / 111319.9;
+            deg_per_m_lon = 1 / (111319.9 * cosd(lat0));
+            waypoints = zeros(size(local_points));
+            waypoints_local = local_points;
+
+            for i = 1:size(local_points, 1)
+                east_m = local_points(i, 1);
+                north_m = local_points(i, 2);
+                waypoints(i, 1) = lat0 + north_m * deg_per_m_lat;
+                waypoints(i, 2) = lon0 + east_m * deg_per_m_lon;
+                waypoints(i, 3) = local_points(i, 3);
+            end
+        end
+
+        function [waypoints, waypoints_local] = build_wind_test_course_waypoints_local(obj, origin_x, origin_y, base_alt, straight_length_m, climb_height_m, descent_forward_m, descent_lateral_m, straight_points, climb_points, descent_points, return_curve_points, waypoint_spacing_m, smooth_interpolation)
+            local_offsets = obj.build_wind_test_course_local_offsets( ...
+                base_alt, straight_length_m, climb_height_m, descent_forward_m, descent_lateral_m, ...
+                straight_points, climb_points, descent_points, return_curve_points, ...
+                waypoint_spacing_m, smooth_interpolation);
+            waypoints = local_offsets;
+            waypoints(:, 1) = origin_x + local_offsets(:, 1);
+            waypoints(:, 2) = origin_y + local_offsets(:, 2);
+            waypoints_local = waypoints;
+        end
+
+        function points = build_wind_test_course_local_offsets(obj, base_alt, straight_length_m, climb_height_m, descent_forward_m, descent_lateral_m, straight_points, climb_points, descent_points, return_curve_points, waypoint_spacing_m, smooth_interpolation)
+            straight_points = max(2, round(straight_points));
+            climb_points = max(2, round(climb_points));
+            descent_points = max(2, round(descent_points));
+            return_curve_points = max(4, round(return_curve_points));
+
+            high_alt = base_alt + climb_height_m;
+            end_straight = [straight_length_m, 0, base_alt];
+            end_descent = [straight_length_m + descent_forward_m, descent_lateral_m, base_alt];
+
+            points = [];
+
+            % 1) Long straight segment at constant altitude.
+            t = linspace(0, 1, straight_points + 1);
+            t(1) = [];
+            for i = 1:numel(t)
+                points = [points; straight_length_m * t(i), 0, base_alt]; %#ok<AGROW>
+            end
+
+            % 2) Vertical climb at the end of the straight segment.
+            t = linspace(0, 1, climb_points + 1);
+            t(1) = [];
+            for i = 1:numel(t)
+                points = [points; end_straight(1), end_straight(2), base_alt + climb_height_m * t(i)]; %#ok<AGROW>
+            end
+
+            % 3) Sloped descent with lateral offset to expose crosswind drift.
+            t = linspace(0, 1, descent_points + 1);
+            t(1) = [];
+            for i = 1:numel(t)
+                x = end_straight(1) + descent_forward_m * t(i);
+                y = descent_lateral_m * t(i);
+                z = high_alt + (base_alt - high_alt) * t(i);
+                points = [points; x, y, z]; %#ok<AGROW>
+            end
+
+            % 4) Smooth curved return to home. Quadratic Bezier keeps the path continuous
+            % while bending away from the straight line for a clearer wind-response trace.
+            p0 = end_descent;
+            p2 = [0, 0, base_alt];
+            curve_bulge_m = max(12, 0.35 * hypot(p0(1), p0(2)));
+            if p0(2) >= 0
+                curve_side = 1;
+            else
+                curve_side = -1;
+            end
+            p1 = [0.5 * p0(1), p0(2) + curve_side * curve_bulge_m, base_alt];
+            t = linspace(0, 1, return_curve_points + 1);
+            t(1) = [];
+            for i = 1:numel(t)
+                u = t(i);
+                curve_point = (1 - u)^2 * p0 + 2 * (1 - u) * u * p1 + u^2 * p2;
+                points = [points; curve_point]; %#ok<AGROW>
+            end
+
+            if smooth_interpolation
+                points = obj.interpolate_course_points(points, waypoint_spacing_m);
+            end
+        end
+
+        function smooth_points = interpolate_course_points(~, points, spacing_m)
+            if nargin < 3 || isempty(spacing_m) || spacing_m <= 0 || size(points, 1) < 3
+                smooth_points = points;
+                return;
+            end
+
+            segment_lengths = sqrt(sum(diff(points, 1, 1).^2, 2));
+            cumulative_s = [0; cumsum(segment_lengths)];
+            keep = [true; diff(cumulative_s) > 1e-6];
+            points = points(keep, :);
+            cumulative_s = cumulative_s(keep);
+
+            total_length = cumulative_s(end);
+            if total_length <= spacing_m
+                smooth_points = points;
+                return;
+            end
+
+            sample_count = max(size(points, 1), ceil(total_length / spacing_m) + 1);
+            sample_s = linspace(0, total_length, sample_count)';
+            smooth_points = zeros(sample_count, 3);
+            for axis_idx = 1:3
+                smooth_points(:, axis_idx) = interp1(cumulative_s, points(:, axis_idx), sample_s, 'pchip');
+            end
+
+            smooth_points(1, :) = points(1, :);
+            smooth_points(end, :) = points(end, :);
         end
         
         function publish_goal(obj, lat, lon, alt)
@@ -859,6 +1090,12 @@ classdef CircleControlModule < handle
                 obj.flight_log.target_lat(end+1, 1) = target_lat;
                 obj.flight_log.target_lon(end+1, 1) = target_lon;
                 obj.flight_log.target_alt(end+1, 1) = target_alt;
+                obj.flight_log.airspeed_mps(end+1, 1) = obj.get_airspeed_magnitude(state);
+                [wind_vec, wind_mag] = obj.get_wind_vector(state);
+                obj.flight_log.wind_x(end+1, 1) = wind_vec(1);
+                obj.flight_log.wind_y(end+1, 1) = wind_vec(2);
+                obj.flight_log.wind_z(end+1, 1) = wind_vec(3);
+                obj.flight_log.wind_mps(end+1, 1) = wind_mag;
             catch
             end
         end
@@ -875,8 +1112,38 @@ classdef CircleControlModule < handle
                 'altitude', [], ...
                 'target_lat', [], ...
                 'target_lon', [], ...
-                'target_alt', [] ...
+                'target_alt', [], ...
+                'airspeed_mps', [], ...
+                'wind_x', [], ...
+                'wind_y', [], ...
+                'wind_z', [], ...
+                'wind_mps', [] ...
             );
+        end
+
+        function mag = get_airspeed_magnitude(~, state)
+            mag = NaN;
+            try
+                if isfield(state, 'airspeed')
+                    ax = double(state.airspeed.true_airspeed_x);
+                    ay = double(state.airspeed.true_airspeed_y);
+                    az = double(state.airspeed.true_airspeed_z);
+                    mag = norm([ax, ay, az]);
+                end
+            catch
+            end
+        end
+
+        function [vec, mag] = get_wind_vector(~, state)
+            vec = [NaN, NaN, NaN];
+            mag = NaN;
+            try
+                if isfield(state, 'wind')
+                    vec = [double(state.wind.x), double(state.wind.y), double(state.wind.z)];
+                    mag = norm(vec);
+                end
+            catch
+            end
         end
 
         function ok = run_mavproxy_command(obj, command_text, timeout_s)

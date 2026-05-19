@@ -262,7 +262,7 @@ classdef SimulationConfig
  topics.baro = [ns '/baro/sample'];
  topics.battery = [ns '/battery'];
  topics.navsat = [ns '/navsat'];
- topics.airspeed = [ns '/airspeed'];
+topics.airspeed = [ns '/air_speed'];
  topics.status = [ns '/status'];
  topics.rc = [ns '/rc'];
  topics.time = [ns '/time'];
@@ -308,9 +308,9 @@ classdef SimulationConfig
  case 'baro'
  candidates = {[ns '/air_pressure'], [ns '/baro/sample'], [ns '/baro'], '/iris/air_pressure', '/baro/sample', '/baro', '/mavros/altitude'};
  case 'airspeed'
- candidates = {[ns '/airspeed'], '/iris/airspeed', '/airspeed', '/ap/airspeed'};
+ candidates = {[ns '/air_speed'], [ns '/airspeed'], '/iris/air_speed', '/iris/airspeed', '/air_speed', '/airspeed', '/ap/air_speed', '/ap/airspeed'};
  case 'battery'
- candidates = {[ns '/battery/state'], [ns '/battery'], '/iris/battery/state', '/iris/battery', '/battery/state', '/battery', '/ap/battery', '/mavros/battery'};
+ candidates = {[ns '/battery'], [ns '/battery/state'], '/iris/battery', '/iris/battery/state', '/battery', '/battery/state', '/ap/battery', '/mavros/battery'};
  case 'status'
  candidates = {[ns '/status'], '/status', '/ap/status', '/mavros/state'};
  case 'rc'

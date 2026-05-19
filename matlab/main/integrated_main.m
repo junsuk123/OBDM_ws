@@ -99,23 +99,6 @@ try
     ns = sim.get_namespace();
     fprintf('✓ Simulation ready. Namespace: %s\n', ns);
 
-    % Optional: auto-publish a single wind command from MATLAB for testing.
-    % Enable by setting environment variable OBDM_AUTO_PUBLISH_WIND=1
-    try
-        if strcmpi(getenv('OBDM_AUTO_PUBLISH_WIND'), '1')
-            try
-                wc = WindControlModule('namespace', ns);
-                preset = getenv('OBDM_WIND_PRESET');
-                if isempty(preset), preset = 'safe'; end
-                fprintf('[integrated_main] Auto-publishing wind preset: %s\n', preset);
-                wc.publishOnce(wc.presetToMsg(preset));
-            catch ME
-                fprintf('[integrated_main] Warning: Auto wind publish failed: %s\n', ME.message);
-            end
-        end
-    catch
-    end
-    
     % Extra wait for full simulation initialization
     % ArduPilot and Gazebo bridge need time to establish JSON sensor communication
     fprintf('\n⏳ Waiting for complete simulation initialization (10 seconds)...\n');
@@ -124,47 +107,100 @@ try
         pause(1.0);
     end
     fprintf('✓ Simulation initialization complete\n\n');
+
+    % Start background helpers before data collection. Wind estimates are
+    % recorded from the airspeed sensor, not from Gazebo wind commands.
+    logger_mod = [];
+    vis_mod = [];
+    collector_mod = [];
+    wind_mod = [];
+    airspeed_bridge_pid = '';
+    virtual_wind_pid = '';
+    world_name = getenv('OBDM_WORLD_NAME');
+    if isempty(world_name)
+        world_name = 'runway';
+    end
+    cfg = struct('namespace', ns, 'verbose', true, 'base_dir', fullfile(pwd, 'matlab', 'data'), 'worldName', world_name);
+
+    try
+        airspeed_bridge_pid = start_airspeed_bridge(ns, world_name);
+    catch ME
+        fprintf('[integrated_main] Warning: Airspeed relay failed to start: %s\n', ME.message);
+    end
+
+    try
+        virtual_wind_pid = start_virtual_wind_sensor(ns, world_name);
+    catch ME
+        fprintf('[integrated_main] Warning: Virtual wind sensor failed to start: %s\n', ME.message);
+    end
+
+    try
+        wind_mod = WindControlModuleAdapter();
+        wind_mod.init(cfg);
+        wind_preset = getenv('OBDM_WIND_PRESET');
+        if isempty(wind_preset)
+            wind_preset = 'safe';
+        end
+        wind_mod.publish_once(wind_preset);
+        fprintf('[integrated_main] Gazebo wind preset published: %s\n', wind_preset);
+        verify_gazebo_wind(world_name);
+    catch ME
+        fprintf('[integrated_main] Warning: WindControlModule failed: %s\n', ME.message);
+    end
+
+    try
+        logger_mod = DataLoggerModule();
+        logger_mod.init(cfg);
+        logger_mod.start();
+        fprintf('[integrated_main] Data logger module started (saving to matlab/data/test/<timestamp>/)\n');
+    catch ME
+        fprintf('[integrated_main] Warning: DataLoggerModule failed to start: %s\n', ME.message);
+    end
+
+    % Start the visualizer only in interactive desktop sessions. In batch
+    % mode the timer can block progression, so keep the workflow non-blocking.
+    enable_visualizer = usejava('desktop') && ~strcmpi(getenv('OBDM_DISABLE_VISUALIZER'), '1');
+    if enable_visualizer
+        try
+            vis_mod = RealtimeVisualizerModule();
+            vis_mod.init(cfg);
+            vis_mod.start();
+        catch ME
+            fprintf('[integrated_main] Warning: RealtimeVisualizerModule failed to start: %s\n', ME.message);
+            vis_mod = [];
+        end
+    else
+        fprintf('[integrated_main] RealtimeVisualizer skipped in batch/headless mode\n');
+    end
+
+    collector_mod = DataCollectorModuleAdapter();
+    collector_mod.init(cfg);
+    collector_mod.start();
     
     %% 2. 센서 데이터 수집
     fprintf('═════════════════════════════════════\n');
     fprintf('2️⃣ Data Collection Phase\n');
     fprintf('═════════════════════════════════════\n\n');
     
-    collector = DataCollectionModule('namespace', ns, 'verbose', true);
-    collector = collector.subscribe_to_topics();
-    
     fprintf('  Collecting sensor data for 5 seconds...\n\n');
-    data = collector.collect_data(5);
-    collector.print_summary(data);
-    collector.unsubscribe_from_topics();
-
-    % Start data logger (separate from visualizer for independent operation)
-    data_logger = [];
-    wind_control = [];
-    try
-        data_logger = DataLogger('namespace', ns, 'verbose', true);
-        data_logger.start_background(0.5);
-        fprintf('[integrated_main] Data logger started (saving to matlab/data/test/<timestamp>/)\n');
-        
-        % Auto-start wind publishing for data collection
-        try
-            wind_control = WindControlModule('namespace', ns);
-            wind_control.startPeriodic('safe', 1.0);
-            fprintf('[integrated_main] Wind publishing started for data collection\n');
-        catch ME
-            fprintf('[integrated_main] Warning: Could not start wind publishing: %s\n', ME.message);
-        end
-    catch ME
-        fprintf('[integrated_main] Warning: DataLogger failed to start: %s\n', ME.message);
+    data = collector_mod.collect_data(5);
+    if exist('collector_mod','var') && ~isempty(collector_mod) && ~isempty(collector_mod.collector)
+        collector_mod.collector.print_summary(data);
     end
 
-    % Start realtime visualizer in background to monitor odom and wind
-    vis = [];
+    % Persist the collected virtual wind stream into the wind log.
     try
-        vis = RealtimeVisualizer('namespace', ns, 'verbose', true);
-        vis.start_background(0.5);
-    catch
-        fprintf('[integrated_main] Warning: RealtimeVisualizer failed to start\n');
+        if exist('logger_mod', 'var') && ~isempty(logger_mod) && isfield(data, 'wind') && ~isempty(data.wind)
+            for idx = 1:size(data.wind, 1)
+                row = data.wind(idx, :);
+                if numel(row) >= 3 && all(isfinite(row(1:3)))
+                    logger_mod.logger.log_wind(max(0, idx - 1), row(1), row(2), row(3), 'virtual_wind_sensor');
+                end
+            end
+            fprintf('[integrated_main] Virtual wind samples recorded: %d\n', size(data.wind, 1));
+        end
+    catch ME
+        fprintf('[integrated_main] Warning: Could not persist virtual wind samples: %s\n', ME.message);
     end
     
     %% 3. 제어 테스트 (필수 실행)
@@ -173,7 +209,7 @@ try
     skip_control = getenv('OBDM_SKIP_CONTROL');
     if isempty(skip_control) || ~strcmpi(skip_control, '1')
         fprintf('═════════════════════════════════════\n');
-        fprintf('3️⃣ Control Test: Takeoff / Hover / Circle Flight\n');
+        fprintf('3️⃣ Control Test: Takeoff / Hover / Wind Course Flight\n');
         fprintf('═════════════════════════════════════\n');
         fprintf('⏳ Pre-flight checks...\n\n');
         
@@ -212,13 +248,24 @@ try
                 
                 % Execute flight control with explicit error handling
                 success = controller.execute_circle_flight(...
-                    'radius_m', 10, ...
-                    'altitude_agl_m', 3, ...
-                    'num_points', 8, ...
-                    'tolerance_m', 3, ...
-                    'waypoint_timeout_s', 10, ...
+                    'course_type', 'wind_test', ...
+                    'altitude_agl_m', 5, ...
+                    'straight_length_m', 35, ...
+                    'climb_height_m', 8, ...
+                    'descent_forward_m', 35, ...
+                    'descent_lateral_m', 18, ...
+                    'straight_points', 6, ...
+                    'climb_points', 4, ...
+                    'descent_points', 6, ...
+                    'return_curve_points', 12, ...
+                    'waypoint_spacing_m', 3, ...
+                    'smooth_interpolation', true, ...
+                    'tolerance_m', 4, ...
+                    'waypoint_timeout_s', 18, ...
+                    'land_at_end', true, ...
+                    'landing_timeout_s', 45, ...
                     'hover_duration_s', 2, ...
-                    'hover_tolerance_m', 4, ...
+                    'hover_tolerance_m', 5, ...
                     'sample_interval_s', 0.5);
                 
                 % Check if flight control completed or failed
@@ -226,12 +273,12 @@ try
                 waypoints_local = controller.get_last_waypoints_local();
                 
                 if success
-                    fprintf('\n✓ Circle flight completed successfully\n');
+                    fprintf('\n✓ Wind course flight completed successfully\n');
                     if ~isempty(flight_log) && isfield(flight_log, 'time_s') && ~isempty(flight_log.time_s)
                         plot_control_trajectory(flight_log, waypoints_local, ns);
                     end
                 else
-                    fprintf('\n✗ Circle flight failed to complete (success=false)\n');
+                    fprintf('\n✗ Wind course flight failed to complete (success=false)\n');
                     fprintf('   Check error messages above for details\n');
                 end
                 
@@ -256,6 +303,21 @@ try
         fprintf('═════════════════════════════════════\n\n');
         fprintf('(제어 테스트를 실행하려면 OBDM_SKIP_CONTROL를 설정 해제)\n\n');
     end
+
+    try
+        fprintf('[integrated_main] Final sensor summary after control phase\n');
+        if exist('collector_mod','var') && ~isempty(collector_mod) && ~isempty(collector_mod.collector)
+            collector_mod.collector.print_summary(collector_mod.collector.collected_data);
+        end
+    catch
+    end
+
+    try
+        if exist('collector_mod','var') && ~isempty(collector_mod)
+            collector_mod.cleanup();
+        end
+    catch
+    end
     
     %% 4. 완료
     % Ensure vehicle is landed at the end of the test (best-effort)
@@ -268,8 +330,8 @@ try
 
     % Clean up visualizer and data logger
     try
-        if exist('vis', 'var') && ~isempty(vis)
-            vis.stop();
+        if exist('vis_mod', 'var') && ~isempty(vis_mod)
+            vis_mod.stop();
             fprintf('[integrated_main] Visualizer stopped\n');
         end
     catch ME
@@ -277,12 +339,26 @@ try
     end
     
     try
-        if exist('data_logger', 'var') && ~isempty(data_logger)
-            data_logger.cleanup();
+        if exist('logger_mod', 'var') && ~isempty(logger_mod)
+            logger_mod.cleanup();
             fprintf('[integrated_main] Data logger cleaned up\n');
         end
     catch ME
         fprintf('[integrated_main] Data logger cleanup warning: %s\n', ME.message);
+    end
+
+    try
+        if exist('wind_mod', 'var') && ~isempty(wind_mod)
+            wind_mod.cleanup();
+        end
+    catch
+    end
+    if strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
+        fprintf('[integrated_main] Airspeed relay left running with simulation (PID: %s)\n', strtrim(airspeed_bridge_pid));
+        fprintf('[integrated_main] Virtual wind sensor left running with simulation (PID: %s)\n', strtrim(virtual_wind_pid));
+    else
+        stop_background_pid(airspeed_bridge_pid, 'Airspeed relay');
+        stop_background_pid(virtual_wind_pid, 'Virtual wind sensor');
     end
 
     fprintf('\n═════════════════════════════════════\n');
@@ -298,16 +374,110 @@ catch ME
     
     % Emergency cleanup on exception
     try
-        if exist('vis', 'var') && ~isempty(vis)
-            vis.stop();
+        if exist('vis_mod', 'var') && ~isempty(vis_mod)
+            vis_mod.stop();
         end
     catch
     end
     try
-        if exist('data_logger', 'var') && ~isempty(data_logger)
-            data_logger.cleanup();
+        if exist('logger_mod', 'var') && ~isempty(logger_mod)
+            logger_mod.cleanup();
         end
     catch
+    end
+    try
+        if exist('wind_mod', 'var') && ~isempty(wind_mod)
+            wind_mod.cleanup();
+        end
+    catch
+    end
+    try
+        if exist('airspeed_bridge_pid', 'var') && ~strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
+            stop_background_pid(airspeed_bridge_pid, 'Airspeed relay');
+        end
+        if exist('virtual_wind_pid', 'var') && ~strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
+            stop_background_pid(virtual_wind_pid, 'Virtual wind sensor');
+        end
+    catch
+    end
+end
+
+function pid = start_airspeed_bridge(ns, world_name)
+    pid = '';
+    repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+    script_path = fullfile(repo_root, 'scripts', 'gz_airspeed_to_ros2.py');
+    robot_name = regexprep(ns, '^/', '');
+    if isempty(robot_name)
+        robot_name = 'iris';
+    end
+
+    log_file = '/tmp/obdm_airspeed_bridge.log';
+    cmd = sprintf(['bash -lc ''source /opt/ros/humble/setup.bash; ' ...
+        'if [ -f /home/j/ardu_ws/install/setup.bash ]; then source /home/j/ardu_ws/install/setup.bash; fi; ' ...
+        'export ROS_DOMAIN_ID=0; export GZ_VERSION=harmonic; ' ...
+        'setsid python3 "%s" --namespace "%s" --world "%s" --robot "%s" --rate 5 > "%s" 2>&1 < /dev/null & echo $!'''], ...
+        script_path, ns, world_name, robot_name, log_file);
+    [status, output] = system(cmd);
+    if status == 0
+        pid = strtrim(output);
+        fprintf('[integrated_main] Airspeed relay started (PID: %s, log: %s)\n', pid, log_file);
+    else
+        fprintf('[integrated_main] Airspeed relay start command failed: %s\n', strtrim(output));
+    end
+end
+
+function pid = start_virtual_wind_sensor(ns, world_name)
+    pid = '';
+    repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+    script_path = fullfile(repo_root, 'scripts', 'gz_virtual_wind_sensor_to_ros2.py');
+    robot_name = regexprep(ns, '^/', '');
+    if isempty(robot_name)
+        robot_name = 'iris';
+    end
+
+    log_file = '/tmp/obdm_virtual_wind_sensor.log';
+    cmd = sprintf(['bash -lc ''source /opt/ros/humble/setup.bash; ' ...
+        'if [ -f /home/j/ardu_ws/install/setup.bash ]; then source /home/j/ardu_ws/install/setup.bash; fi; ' ...
+        'export ROS_DOMAIN_ID=0; export GZ_VERSION=harmonic; ' ...
+        'setsid python3 "%s" --namespace "%s" --world "%s" --robot "%s" --rate 5 > "%s" 2>&1 < /dev/null & echo $!'''], ...
+        script_path, ns, world_name, robot_name, log_file);
+    [status, output] = system(cmd);
+    if status == 0
+        pid = strtrim(output);
+        fprintf('[integrated_main] Virtual wind sensor started (PID: %s, log: %s)\n', pid, log_file);
+    else
+        fprintf('[integrated_main] Virtual wind sensor start command failed: %s\n', strtrim(output));
+    end
+end
+
+function stop_background_pid(pid, label)
+    if nargin < 2 || isempty(label)
+        label = 'Background process';
+    end
+    try
+        if ~isempty(pid)
+            system(sprintf('kill %s 2>/dev/null || true', strtrim(pid)));
+            pause(0.2);
+            system(sprintf('kill -9 %s 2>/dev/null || true', strtrim(pid)));
+            fprintf('[integrated_main] %s stopped (PID: %s)\n', label, strtrim(pid));
+        end
+    catch
+    end
+end
+
+function verify_gazebo_wind(world_name)
+    try
+        cmd = sprintf(['GZ_VERSION=harmonic gz service -s /world/%s/wind_info ' ...
+            '--reqtype gz.msgs.Empty --reptype gz.msgs.Wind --timeout 2000 --req "" 2>/dev/null'], world_name);
+        [status, output] = system(cmd);
+        if status == 0 && contains(output, 'linear_velocity')
+            one_line = regexprep(strtrim(output), '\s+', ' ');
+            fprintf('[integrated_main] Gazebo wind_info: %s\n', one_line);
+        else
+            fprintf('[integrated_main] Warning: Gazebo wind_info service did not respond\n');
+        end
+    catch ME
+        fprintf('[integrated_main] Warning: Gazebo wind verification failed: %s\n', ME.message);
     end
 end
 
@@ -354,11 +524,31 @@ function plot_control_trajectory(flight_log, waypoints_local, ns)
     actual_y = flight_log.y;
     actual_z = flight_log.z;
 
-    scatter3(actual_x, actual_y, actual_z, 18, 'b', 'filled');
+    wind_mag = [];
+    wind_vec = [];
+    if isfield(flight_log, 'wind_mps') && numel(flight_log.wind_mps) == numel(actual_x)
+        wind_mag = flight_log.wind_mps;
+    end
+    if isfield(flight_log, 'wind_x') && numel(flight_log.wind_x) == numel(actual_x)
+        wind_vec = [flight_log.wind_x(:), flight_log.wind_y(:), flight_log.wind_z(:)];
+    end
+
+    if ~isempty(wind_mag) && any(isfinite(wind_mag))
+        scatter3(actual_x, actual_y, actual_z, 28, wind_mag, 'filled');
+        colormap(gca, turbo);
+        cb = colorbar;
+        cb.Label.String = 'Relative wind magnitude (m/s)';
+        add_wind_arrows(gca, actual_x, actual_y, actual_z, wind_vec, wind_mag);
+        legend_entries = {'Actual trajectory', 'Relative wind direction/scale'};
+    else
+        scatter3(actual_x, actual_y, actual_z, 18, 'b', 'filled');
+        legend_entries = {'Actual trajectory'};
+    end
     scatter3(actual_x(1), actual_y(1), actual_z(1), 70, 'g', 'filled');
     scatter3(actual_x(end), actual_y(end), actual_z(end), 70, 'r', 'filled');
 
-    legend_entries = {'Actual trajectory', 'Start', 'End'};
+    legend_entries{end+1} = 'Start';
+    legend_entries{end+1} = 'End';
     if nargin >= 2 && ~isempty(waypoints_local)
         scatter3(waypoints_local(:,1), waypoints_local(:,2), waypoints_local(:,3), 24, 'm', 'filled');
         legend_entries{end+1} = 'Planned waypoints';
@@ -381,6 +571,43 @@ function plot_control_trajectory(flight_log, waypoints_local, ns)
     end
 
     hold off;
+end
+
+function add_wind_arrows(ax, x, y, z, wind_vec, wind_mag)
+    try
+        n = numel(x);
+        if n < 1 || isempty(wind_vec) || size(wind_vec, 1) ~= n
+            return;
+        end
+
+        max_arrows = 32;
+        step = max(1, floor(n / max_arrows));
+        idx = 1:step:n;
+        wind_norm = sqrt(sum(wind_vec(idx, :).^2, 2));
+        valid = wind_norm > 1e-6;
+        idx = idx(valid);
+        if isempty(idx)
+            return;
+        end
+
+        speed_vals = wind_mag(idx);
+        speed_vals(~isfinite(speed_vals)) = 0;
+        max_speed = max(speed_vals);
+        if max_speed <= 0
+            max_speed = 1;
+        end
+
+        span = max([range(x), range(y), range(z), 1]);
+        arrow_len = span * 0.08 * (0.25 + 0.75 * speed_vals ./ max_speed);
+        wind_norm = sqrt(sum(wind_vec(idx, :).^2, 2));
+        ux = wind_vec(idx, 1) ./ wind_norm .* arrow_len(:);
+        uy = wind_vec(idx, 2) ./ wind_norm .* arrow_len(:);
+        uz = wind_vec(idx, 3) ./ wind_norm .* arrow_len(:);
+
+        quiver3(ax, x(idx), y(idx), z(idx), ux, uy, uz, 0, ...
+            'Color', [0.05 0.2 0.45], 'LineWidth', 1.0, 'MaxHeadSize', 0.8);
+    catch
+    end
 end
 
 function perform_landing(ns)
@@ -418,6 +645,28 @@ function perform_landing(ns)
             '        if str(m.flightmode).upper() == "LAND":\n'
             '            break\n'
             '        time.sleep(0.5)\n'
+            '    low_alt_count = 0\n'
+            '    t1 = time.time()\n'
+            '    while time.time() - t1 < 45:\n'
+            '        msg = m.recv_match(type=["GLOBAL_POSITION_INT", "LOCAL_POSITION_NED", "HEARTBEAT"], blocking=True, timeout=1)\n'
+            '        if msg is None:\n'
+            '            continue\n'
+            '        if msg.get_type() == "GLOBAL_POSITION_INT":\n'
+            '            rel_alt_m = float(msg.relative_alt) / 1000.0\n'
+            '            print(f"LAND_MONITOR rel_alt={rel_alt_m:.2f}")\n'
+            '            if rel_alt_m <= 0.35:\n'
+            '                low_alt_count += 1\n'
+            '            else:\n'
+            '                low_alt_count = 0\n'
+            '        elif msg.get_type() == "LOCAL_POSITION_NED":\n'
+            '            z_m = abs(float(msg.z))\n'
+            '            print(f"LAND_MONITOR z_abs={z_m:.2f}")\n'
+            '            if z_m <= 0.35:\n'
+            '                low_alt_count += 1\n'
+            '            else:\n'
+            '                low_alt_count = 0\n'
+            '        if low_alt_count >= 3:\n'
+            '            break\n'
             '    m.arducopter_disarm()\n'
             '    print("LAND_OK")\n'
             'except Exception as e:\n'

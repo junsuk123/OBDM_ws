@@ -13,6 +13,8 @@
 classdef DataCollectionModule < handle
     properties (Access = private)
         namespace
+        world_name
+        robot_name
         ros_node
         subscribers
         collected_data
@@ -34,8 +36,19 @@ classdef DataCollectionModule < handle
             
             obj.namespace = p.Results.namespace;
             obj.verbose = p.Results.verbose;
+            obj.world_name = getenv('OBDM_WORLD_NAME');
+            if isempty(obj.world_name)
+                obj.world_name = 'runway';
+            end
+            obj.robot_name = regexprep(obj.namespace, '^/', '');
+            if isempty(obj.robot_name)
+                obj.robot_name = 'iris';
+            end
             obj.subscribers = struct();
             obj.collected_data = struct();
+            obj.collected_data.battery = [];
+            obj.collected_data.airspeed = [];
+            obj.collected_data.wind = [];
             obj.gps_publisher = [];
             
             if obj.verbose
@@ -50,7 +63,7 @@ classdef DataCollectionModule < handle
                 
                 % IMU subscriber
                 try
-                    resolved_imu = sprintf('%s/imu', obj.namespace);
+                    resolved_imu = SimulationConfig.resolve_topic('imu', obj.namespace);
                     obj.subscribers.imu = ros2subscriber(obj.ros_node, resolved_imu, "sensor_msgs/Imu");
                     if obj.verbose
                         fprintf('  ✓ IMU: %s\n', resolved_imu);
@@ -63,7 +76,7 @@ classdef DataCollectionModule < handle
                 
                 % GPS subscriber
                 try
-                    resolved_gps = sprintf('%s/navsat', obj.namespace);
+                    resolved_gps = SimulationConfig.resolve_topic('navsat', obj.namespace);
                     obj.subscribers.gps = ros2subscriber(obj.ros_node, resolved_gps, "sensor_msgs/NavSatFix");
                     if obj.verbose
                         fprintf('  ✓ GPS: %s\n', resolved_gps);
@@ -76,7 +89,7 @@ classdef DataCollectionModule < handle
                 
                 % Odometry subscriber
                 try
-                    resolved_odom = sprintf('%s/odometry', obj.namespace);
+                    resolved_odom = SimulationConfig.resolve_topic('odometry', obj.namespace);
                     obj.subscribers.odom = ros2subscriber(obj.ros_node, resolved_odom, "nav_msgs/Odometry");
                     if obj.verbose
                         fprintf('  ✓ ODOM: %s\n', resolved_odom);
@@ -89,7 +102,7 @@ classdef DataCollectionModule < handle
                 
                 % TF subscriber
                 try
-                    resolved_tf = sprintf('%s/tf', obj.namespace);
+                    resolved_tf = SimulationConfig.resolve_topic('tf', obj.namespace);
                     obj.subscribers.tf = ros2subscriber(obj.ros_node, resolved_tf, "tf2_msgs/TFMessage");
                     if obj.verbose
                         fprintf('  ✓ TF: %s\n', resolved_tf);
@@ -102,7 +115,7 @@ classdef DataCollectionModule < handle
                 
                 % Battery subscriber
                 try
-                    resolved_battery = sprintf('%s/battery', obj.namespace);
+                    resolved_battery = SimulationConfig.resolve_topic('battery', obj.namespace);
                     obj.subscribers.battery = ros2subscriber(obj.ros_node, resolved_battery, "sensor_msgs/BatteryState");
                     if obj.verbose
                         fprintf('  ✓ Battery: %s\n', resolved_battery);
@@ -115,8 +128,12 @@ classdef DataCollectionModule < handle
                 
                 % Airspeed subscriber (optional - may not be available in all bridges)
                 try
-                    resolved_airspeed = sprintf('%s/air_speed', obj.namespace);
-                    obj.subscribers.airspeed = ros2subscriber(obj.ros_node, resolved_airspeed, "geometry_msgs/Vector3Stamped");
+                    resolved_airspeed = SimulationConfig.resolve_topic('airspeed', obj.namespace);
+                    try
+                        obj.subscribers.airspeed = ros2subscriber(obj.ros_node, resolved_airspeed, "ardupilot_msgs/Airspeed");
+                    catch
+                        obj.subscribers.airspeed = ros2subscriber(obj.ros_node, resolved_airspeed, "geometry_msgs/Vector3Stamped");
+                    end
                     if obj.verbose
                         fprintf('  ✓ Airspeed: %s\n', resolved_airspeed);
                     end
@@ -124,6 +141,19 @@ classdef DataCollectionModule < handle
                     % Airspeed often not available - gracefully handle
                     if obj.verbose
                         fprintf('  ⚠ Airspeed not available (optional): %s\n', ME.message);
+                    end
+                end
+
+                % Virtual wind sensor: apparent wind vector acting on vehicle.
+                try
+                    resolved_wind = sprintf('%s/wind_sensor', obj.namespace);
+                    obj.subscribers.wind = ros2subscriber(obj.ros_node, resolved_wind, "geometry_msgs/Vector3Stamped");
+                    if obj.verbose
+                        fprintf('  ✓ Wind sensor: %s\n', resolved_wind);
+                    end
+                catch ME
+                    if obj.verbose
+                        fprintf('  ⚠ Wind sensor not available (optional): %s\n', ME.message);
                     end
                 end
                 
@@ -158,19 +188,23 @@ classdef DataCollectionModule < handle
             data.tf = [];
             data.battery = [];
             data.airspeed = [];
-            
+            data.wind = [];
+
             last_stamp.imu = NaN;
             last_stamp.gps = NaN;
             last_stamp.odom = NaN;
             last_stamp.tf = NaN;
             last_stamp.battery = NaN;
             last_stamp.airspeed = NaN;
+            last_stamp.wind = NaN;
             
             if obj.verbose
                 fprintf('\n[DataCollectionModule] Collecting data for %d seconds...\n', duration_sec);
             end
             
             for t = 1:duration_sec
+                got_airspeed = false;
+
                 % GPS 테스트 데이터 발행 (수집과 동시에)
                 if ~isempty(obj.gps_publisher)
                     try
@@ -271,36 +305,55 @@ classdef DataCollectionModule < handle
                     catch
                     end
                 end
-                
+
                 % Battery
                 if isfield(obj.subscribers, 'battery') && ~isempty(obj.subscribers.battery)
                     try
-                        [msg, status] = receive(obj.subscribers.battery, 1.0);
+                        [msg, status] = receive(obj.subscribers.battery, 0.5);
                         if status && ~isempty(msg)
                             stamp = obj.get_msg_stamp(msg);
                             if isnan(last_stamp.battery) || stamp ~= last_stamp.battery
-                                data.battery = [data.battery; msg.percentage, msg.voltage, msg.current, msg.charge, msg.capacity, msg.design_capacity];
+                                data.battery = [data.battery; obj.extract_battery_row(msg)]; %#ok<AGROW>
                                 last_stamp.battery = stamp;
                             end
                         end
                     catch
                     end
                 end
-                
-                % Airspeed (alternative message type handling)
+
+                % Airspeed
                 if isfield(obj.subscribers, 'airspeed') && ~isempty(obj.subscribers.airspeed)
                     try
                         [msg, status] = receive(obj.subscribers.airspeed, 0.5);
                         if status && ~isempty(msg)
                             stamp = obj.get_msg_stamp(msg);
+                            got_airspeed = true;
                             if isnan(last_stamp.airspeed) || stamp ~= last_stamp.airspeed
-                                % Handle Vector3Stamped type: vector.x, vector.y, vector.z
-                                if isfield(msg, 'vector')
-                                    data.airspeed = [data.airspeed; msg.vector.x, msg.vector.y, msg.vector.z];
-                                else
-                                    data.airspeed = [data.airspeed; 0, 0, 0];
-                                end
+                                data.airspeed = [data.airspeed; obj.extract_airspeed_row(msg)]; %#ok<AGROW>
                                 last_stamp.airspeed = stamp;
+                            end
+                        end
+                    catch
+                    end
+                end
+
+                if ~exist('got_airspeed', 'var') || ~got_airspeed
+                    [has_gz_airspeed, gz_row] = obj.read_gz_airspeed_row();
+                    if has_gz_airspeed
+                        data.airspeed = [data.airspeed; gz_row]; %#ok<AGROW>
+                        last_stamp.airspeed = now;
+                    end
+                end
+
+                % Virtual wind sensor
+                if isfield(obj.subscribers, 'wind') && ~isempty(obj.subscribers.wind)
+                    try
+                        [msg, status] = receive(obj.subscribers.wind, 0.5);
+                        if status && ~isempty(msg)
+                            stamp = obj.get_msg_stamp(msg);
+                            if isnan(last_stamp.wind) || stamp ~= last_stamp.wind
+                                data.wind = [data.wind; obj.extract_vector3_row(msg)]; %#ok<AGROW>
+                                last_stamp.wind = stamp;
                             end
                         end
                     catch
@@ -308,9 +361,9 @@ classdef DataCollectionModule < handle
                 end
                 
                 if obj.verbose
-                    fprintf('[%2d/%2d] IMU: %d, GPS: %d, ODOM: %d, TF: %d, Battery: %d, Airspeed: %d\n', ...
+                    fprintf('[%2d/%2d] IMU: %d, GPS: %d, ODOM: %d, TF: %d, Battery: %d, Airspeed: %d, Wind: %d\n', ...
                         t, duration_sec, size(data.imu,1), size(data.gps,1), size(data.odom,1), ...
-                        size(data.tf,1), size(data.battery,1), size(data.airspeed,1));
+                        size(data.tf,1), size(data.battery,1), size(data.airspeed,1), size(data.wind,1));
                 end
             end
             
@@ -328,6 +381,9 @@ classdef DataCollectionModule < handle
             fprintf('  TF messages:      %d\n', size(data.tf, 1));
             fprintf('  Battery messages: %d\n', size(data.battery, 1));
             fprintf('  Airspeed messages:%d\n', size(data.airspeed, 1));
+            if isfield(data, 'wind')
+                fprintf('  Wind messages:    %d\n', size(data.wind, 1));
+            end
             fprintf('═════════════════════════════════════\n\n');
         end
         
@@ -352,6 +408,9 @@ classdef DataCollectionModule < handle
                 if isfield(obj.subscribers, 'airspeed') && ~isempty(obj.subscribers.airspeed)
                     clear obj.subscribers.airspeed;
                 end
+                if isfield(obj.subscribers, 'wind') && ~isempty(obj.subscribers.wind)
+                    clear obj.subscribers.wind;
+                end
                 if ~isempty(obj.gps_publisher)
                     clear obj.gps_publisher;
                 end
@@ -367,6 +426,27 @@ classdef DataCollectionModule < handle
                 end
             end
         end
+
+        function callback_battery(obj, msg)
+            try
+                obj.collected_data.battery = [obj.collected_data.battery; obj.extract_battery_row(msg)]; %#ok<AGROW>
+            catch
+            end
+        end
+
+        function callback_airspeed(obj, msg)
+            try
+                obj.collected_data.airspeed = [obj.collected_data.airspeed; obj.extract_airspeed_row(msg)]; %#ok<AGROW>
+            catch
+            end
+        end
+
+        function callback_wind(obj, msg)
+            try
+                obj.collected_data.wind = [obj.collected_data.wind; obj.extract_vector3_row(msg)]; %#ok<AGROW>
+            catch
+            end
+        end
     end
     
     methods (Access = private)
@@ -377,12 +457,73 @@ classdef DataCollectionModule < handle
                 stamp = now;
             end
         end
-        
+
+        function row = extract_battery_row(~, msg)
+            row = nan(1, 6);
+            try, if isfield(msg, 'percentage'), row(1) = double(msg.percentage); end; catch, end
+            try, if isfield(msg, 'voltage'), row(2) = double(msg.voltage); end; catch, end
+            try, if isfield(msg, 'current'), row(3) = double(msg.current); end; catch, end
+            try, if isfield(msg, 'charge'), row(4) = double(msg.charge); end; catch, end
+            try, if isfield(msg, 'capacity'), row(5) = double(msg.capacity); end; catch, end
+            try, if isfield(msg, 'design_capacity'), row(6) = double(msg.design_capacity); end; catch, end
+        end
+
+        function row = extract_airspeed_row(~, msg)
+            row = [NaN, NaN, NaN];
+            try
+                if isfield(msg, 'true_airspeed')
+                    row = [double(msg.true_airspeed.x), double(msg.true_airspeed.y), double(msg.true_airspeed.z)];
+                elseif isfield(msg, 'vector')
+                    row = [double(msg.vector.x), double(msg.vector.y), double(msg.vector.z)];
+                end
+            catch
+            end
+        end
+
+        function row = extract_vector3_row(~, msg)
+            row = [NaN, NaN, NaN];
+            try
+                if isfield(msg, 'vector') || isprop(msg, 'vector')
+                    row = [double(msg.vector.x), double(msg.vector.y), double(msg.vector.z)];
+                end
+            catch
+            end
+        end
+
         function stamp = get_tf_stamp(obj, tf)
             try
                 stamp = double(tf.header.stamp.sec) + double(tf.header.stamp.nanosec) * 1e-9;
             catch
                 stamp = now;
+            end
+        end
+
+        function [ok, row] = read_gz_airspeed_row(obj)
+            ok = false;
+            row = [NaN, NaN, NaN];
+            try
+                topic = sprintf('/world/%s/model/%s/link/base_link/sensor/air_speed_sensor/air_speed', obj.world_name, obj.robot_name);
+                cmd = sprintf('timeout 0.5 gz topic -e -t "%s" -n 1 2>/dev/null', topic);
+                [status, output] = system(cmd);
+                if status ~= 0 || isempty(strtrim(output))
+                    return;
+                end
+
+                token = regexp(output, 'diff_pressure:\s*([-+0-9.eE]+)', 'tokens', 'once');
+                if isempty(token)
+                    return;
+                end
+
+                diff_pressure = str2double(token{1});
+                if ~isfinite(diff_pressure)
+                    return;
+                end
+
+                rho = 1.225;
+                tas = sqrt(max(0, 2 * abs(diff_pressure) / rho));
+                row = [tas, 0, 0];
+                ok = true;
+            catch
             end
         end
     end

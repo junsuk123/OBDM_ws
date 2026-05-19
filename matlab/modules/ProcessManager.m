@@ -116,6 +116,10 @@ classdef ProcessManager
 			relay_patterns = {
 				'relay';
 				'topic_tools';
+				'parameter_bridge';
+				'ros_gz_bridge';
+				'gz_airspeed_to_ros2.py';
+				'gz_virtual_wind_sensor_to_ros2.py';
 			};
 			obj = obj.terminate_process_patterns(relay_patterns, 'ROS2 relay', 1);
 		end

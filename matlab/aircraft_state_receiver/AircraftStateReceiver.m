@@ -11,6 +11,7 @@ classdef AircraftStateReceiver < handle
         subscriber_baro
         subscriber_battery
         subscriber_airspeed
+        subscriber_wind
         subscriber_odometry
         
         current_state
@@ -65,6 +66,7 @@ classdef AircraftStateReceiver < handle
                 resolved_baro = SimulationConfig.resolve_topic('baro', current_ns);
                 resolved_battery = SimulationConfig.resolve_topic('battery', current_ns);
                 resolved_airspeed = SimulationConfig.resolve_topic('airspeed', current_ns);
+                resolved_wind = [current_ns '/wind_sensor'];
                 
                 % GPS: 직접 경로 구성 (resolve_topic_if_available 타이밍 문제 회피)
                 % 우선순위: /iris/navsat → /iris/gpsfix → 다른 후보들
@@ -117,6 +119,10 @@ classdef AircraftStateReceiver < handle
                 obj.subscriber_baro = obj.try_subscribe(resolved_baro, 'sensor_msgs/FluidPressure', @obj.callback_baro);
                 obj.subscriber_battery = obj.try_subscribe(resolved_battery, 'sensor_msgs/BatteryState', @obj.callback_battery);
                 obj.subscriber_airspeed = obj.try_subscribe(resolved_airspeed, 'ardupilot_msgs/Airspeed', @obj.callback_airspeed);
+                if isempty(obj.subscriber_airspeed)
+                    obj.subscriber_airspeed = obj.try_subscribe(resolved_airspeed, 'geometry_msgs/Vector3Stamped', @obj.callback_airspeed);
+                end
+                obj.subscriber_wind = obj.try_subscribe(resolved_wind, 'geometry_msgs/Vector3Stamped', @obj.callback_wind);
                 
                 % 구독 성공 여부 확인
                 obj.is_subscribed = ~isempty(obj.subscriber_tf) || ~isempty(obj.subscriber_imu) || ...
@@ -132,6 +138,7 @@ classdef AircraftStateReceiver < handle
                     fprintf('  BARO: %s\n', resolved_baro);
                     fprintf('  BATTERY: %s\n', resolved_battery);
                     fprintf('  AIRSPEED: %s\n', resolved_airspeed);
+                    fprintf('  WIND SENSOR: %s\n', resolved_wind);
                 end
                 
                 if ~obj.is_subscribed
@@ -453,10 +460,24 @@ classdef AircraftStateReceiver < handle
         function callback_airspeed(obj, msg)
             %% Airspeed 콜백
             try
-                obj.current_state.airspeed.true_airspeed_x = msg.true_airspeed.x;
-                obj.current_state.airspeed.true_airspeed_y = msg.true_airspeed.y;
-                obj.current_state.airspeed.true_airspeed_z = msg.true_airspeed.z;
-                obj.current_state.airspeed.eas_2_tas = msg.eas_2_tas;
+                if isfield(msg, 'true_airspeed')
+                    obj.current_state.airspeed.true_airspeed_x = msg.true_airspeed.x;
+                    obj.current_state.airspeed.true_airspeed_y = msg.true_airspeed.y;
+                    obj.current_state.airspeed.true_airspeed_z = msg.true_airspeed.z;
+                elseif isprop(msg, 'vector')
+                    obj.current_state.airspeed.true_airspeed_x = msg.vector.x;
+                    obj.current_state.airspeed.true_airspeed_y = msg.vector.y;
+                    obj.current_state.airspeed.true_airspeed_z = msg.vector.z;
+                else
+                    obj.current_state.airspeed.true_airspeed_x = 0;
+                    obj.current_state.airspeed.true_airspeed_y = 0;
+                    obj.current_state.airspeed.true_airspeed_z = 0;
+                end
+                if isfield(msg, 'eas_2_tas')
+                    obj.current_state.airspeed.eas_2_tas = msg.eas_2_tas;
+                else
+                    obj.current_state.airspeed.eas_2_tas = 1.0;
+                end
                 
                 obj.current_state.timestamp = now;
                 obj.state_updated = true;
@@ -467,7 +488,25 @@ classdef AircraftStateReceiver < handle
                 end
             end
         end
-        
+
+        function callback_wind(obj, msg)
+            %% Virtual wind sensor callback
+            try
+                if isfield(msg, 'vector') || isprop(msg, 'vector')
+                    obj.current_state.wind.x = msg.vector.x;
+                    obj.current_state.wind.y = msg.vector.y;
+                    obj.current_state.wind.z = msg.vector.z;
+                    obj.current_state.wind.magnitude = norm([msg.vector.x, msg.vector.y, msg.vector.z]);
+                end
+                obj.current_state.timestamp = now;
+                obj.state_updated = true;
+            catch ME
+                if obj.verbose
+                    fprintf('[AircraftStateReceiver] WIND error: %s\n', ME.message);
+                end
+            end
+        end
+
         function state = create_empty_state(obj)
             %% 빈 상태 구조체 생성
             state = struct();
@@ -531,6 +570,13 @@ classdef AircraftStateReceiver < handle
                 'true_airspeed_y', 0, ...
                 'true_airspeed_z', 0, ...
                 'eas_2_tas', 1 ...
+            );
+
+            state.wind = struct(...
+                'x', 0, ...
+                'y', 0, ...
+                'z', 0, ...
+                'magnitude', 0 ...
             );
             
             state.timestamp = now;
