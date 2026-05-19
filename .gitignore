@@ -10,6 +10,10 @@
 ## Logs and runtime
 /logs/
 /tmp/
+ardu_ws_local/build/
+ardu_ws_local/install/
+ardu_ws_local/log/
+ardu_ws_local/.colcon/
 matlab/logs/
 matlab/home/
 matlab/matlab/data/test/
