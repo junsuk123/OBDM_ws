@@ -92,8 +92,7 @@ classdef SimulationManager
             % Build ROS2 launch command directly (MathWorks + ArduPilot standard)
             % This is more reliable than shell scripts
             
-            home_dir = getenv('HOME');
-            ardu_ws = fullfile(home_dir, 'ardu_ws');
+            ardu_ws = SimulationConfig.get_ardu_ws_path();
             display_env = getenv('DISPLAY');
             xauthority_env = getenv('XAUTHORITY');
             xdg_runtime_env = getenv('XDG_RUNTIME_DIR');
@@ -102,7 +101,7 @@ classdef SimulationManager
             % Check if ardu_ws exists
             if ~isdir(ardu_ws)
                 if obj.verbose
-                        fprintf('[SimulationManager] Warning: ardu_ws not found at %s\\n', fullfile(home_dir, 'ardu_ws'));
+                        fprintf('[SimulationManager] Warning: ardu_ws not found at %s\\n', ardu_ws);
                 end
                 cmd = '';
                 return;
@@ -114,7 +113,7 @@ classdef SimulationManager
             % Uses official ArduPilot Gazebo package configuration
             % Added OpenGL rendering optimization for MATLAB execution
             if strcmpi(strtrim(obj.launch_mode), 'ap_dds_plane')
-                defaults_dir = fullfile(home_dir, 'ardu_ws', 'src', 'ardupilot', 'Tools', 'ros2', 'ardupilot_sitl', 'config', 'default_params');
+                defaults_dir = fullfile(ardu_ws, 'src', 'ardupilot', 'Tools', 'ros2', 'ardupilot_sitl', 'config', 'default_params');
                 defaults_path = sprintf('%s/dds_udp.parm,%s/dds_use_ns.parm', defaults_dir, defaults_dir);
                 base_cmd = sprintf([...
                     'unset LD_LIBRARY_PATH; ' ...
@@ -195,7 +194,7 @@ classdef SimulationManager
                 end
 
                 if config_result.changed && p.Results.rebuild_ardupilot
-                    obj.launch_prefix = sprintf('cd %s && colcon build --packages-select ardupilot_sitl --cmake-force-configure --event-handlers console_direct+', fullfile(getenv('HOME'), 'ardu_ws'));
+                    obj.launch_prefix = sprintf('cd %s && colcon build --packages-select ardupilot_sitl --cmake-force-configure --event-handlers console_direct+', SimulationConfig.get_ardu_ws_path());
                     if obj.verbose
                         fprintf('[SimulationManager] AP_DDS rebuild enabled before launch\n');
                     end
@@ -258,7 +257,7 @@ classdef SimulationManager
                 if isempty(launch_cmd)
                     fprintf('✗ Failed to build launch command\n');
                     fprintf('  Possible issues:\n');
-                    fprintf('    • ardu_ws not found at %s\n', fullfile(getenv('HOME'), 'ardu_ws'));
+                    fprintf('    • ardu_ws not found at %s\n', SimulationConfig.get_ardu_ws_path());
                     fprintf('    • ROS2 installation incomplete\n');
                     return;
                 end
@@ -542,8 +541,6 @@ classdef SimulationManager
             fprintf('╚════════════════════════════════╝\\n\\n');
             
             is_valid = true;
-            home_dir = getenv('HOME');
-            
             % Check 1: ROS2 installation
             ros_setup = '/opt/ros/humble/setup.bash';
             if exist(ros_setup, 'file')
@@ -554,7 +551,7 @@ classdef SimulationManager
             end
             
             % Check 2: ArduPilot Gazebo workspace
-            ardu_ws = fullfile(home_dir, 'ardu_ws');
+            ardu_ws = SimulationConfig.get_ardu_ws_path();
             ardu_setup = fullfile(ardu_ws, 'install', 'setup.bash');
             if isdir(ardu_ws) || exist(ardu_ws, 'dir')
                 fprintf('✓ ArduPilot workspace found at %s\n', ardu_ws);

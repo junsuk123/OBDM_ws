@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKSPACE_ROOT="/home/j/SynologyDrive/INCSL/devel/INCSL/OBDM_ws/ardu_ws_local"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_ROOT="${OBDM_ARDU_WS:-${REPO_ROOT}/ardu_ws}"
 PKG_PATH="${WORKSPACE_ROOT}/src/ros_gz/ros_gz_interfaces"
 
 if [ ! -d "$WORKSPACE_ROOT" ]; then
@@ -65,10 +67,10 @@ if [ -f /opt/ros/humble/setup.bash ]; then
   source /opt/ros/humble/setup.bash
   set -u
 fi
-if [ -f /home/j/ardu_ws/install/setup.bash ]; then
+if [ -f "${WORKSPACE_ROOT}/install/setup.bash" ]; then
   # shellcheck disable=SC1091
   set +u
-  source /home/j/ardu_ws/install/setup.bash
+  source "${WORKSPACE_ROOT}/install/setup.bash"
   set -u
 fi
 

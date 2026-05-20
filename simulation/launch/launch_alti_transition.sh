@@ -13,9 +13,12 @@ for a in "$@"; do
 done
 
 # Ensure ROS env sourced if not already
-if [ -f "${HOME}/ardu_ws/install/setup.bash" ]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ARDU_WS="${OBDM_ARDU_WS:-${REPO_ROOT}/ardu_ws}"
+if [ -f "${ARDU_WS}/install/setup.bash" ]; then
   # shellcheck disable=SC1091
-  source "${HOME}/ardu_ws/install/setup.bash"
+  source "${ARDU_WS}/install/setup.bash"
 fi
 source /opt/ros/humble/setup.bash || true
 

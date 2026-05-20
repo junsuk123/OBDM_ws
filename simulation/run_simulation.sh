@@ -12,7 +12,9 @@ NC='\033[0m' # No Color
 # 스크립트 디렉토리
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 WORKSPACE_DIR="$(dirname "$SCRIPT_DIR")"
-ROS2_WORKSPACE="${HOME}/ardu_ws"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROS2_WORKSPACE="${OBDM_ARDU_WS:-${REPO_ROOT}/ardu_ws}"
 
 echo -e "${GREEN}========== OBDM Gazebo 시뮬레이션 시작 ==========${NC}"
 echo "워크스페이스: $WORKSPACE_DIR"

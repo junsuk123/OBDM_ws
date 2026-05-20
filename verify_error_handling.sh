@@ -27,7 +27,9 @@ echo ""
 # Setup environment
 echo "[2/3] Running data collection test..."
 source /opt/ros/humble/setup.bash || true
-source /home/j/ardu_ws/install/setup.bash || true
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ARDU_WS="${OBDM_ARDU_WS:-${SCRIPT_DIR}/ardu_ws}"
+source "${ARDU_WS}/install/setup.bash" || true
 export ROS_DOMAIN_ID=0
 
 cd "$WORKSPACE_DIR"

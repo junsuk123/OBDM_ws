@@ -186,8 +186,29 @@ classdef SimulationConfig
 
  function config_path = get_ap_dds_config_path()
  % Return the workspace-local AP_DDS config header path.
- home_dir = getenv('HOME');
-				config_path = fullfile(home_dir, 'ardu_ws', 'src', 'ardupilot', 'libraries', 'AP_DDS', 'AP_DDS_config.h');
+ config_path = fullfile(SimulationConfig.get_ardu_ws_path(), 'src', 'ardupilot', 'libraries', 'AP_DDS', 'AP_DDS_config.h');
+ end
+
+ function repo_root = get_repo_root()
+ % Return OBDM_ws root based on this file location.
+ repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+ end
+
+ function ardu_ws = get_ardu_ws_path()
+ % Prefer the workspace-local ArduPilot ROS/Gazebo workspace.
+ override = getenv('OBDM_ARDU_WS');
+ if ~isempty(override)
+	 ardu_ws = override;
+	 return;
+ end
+
+ repo_candidate = fullfile(SimulationConfig.get_repo_root(), 'ardu_ws');
+ if isfolder(repo_candidate)
+	 ardu_ws = repo_candidate;
+	 return;
+ end
+
+ ardu_ws = fullfile(getenv('HOME'), 'ardu_ws');
  end
 
  function field_map = get_ap_dds_override_field_map()

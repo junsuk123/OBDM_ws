@@ -10,8 +10,10 @@ echo ""
 export ROS_DOMAIN_ID=0
 export GZ_VERSION=harmonic
 source /opt/ros/humble/setup.bash 2>/dev/null || true
-if [ -f /home/j/ardu_ws/install/setup.bash ]; then
-  source /home/j/ardu_ws/install/setup.bash 2>/dev/null || true
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARDU_WS="${OBDM_ARDU_WS:-${REPO_ROOT}/ardu_ws}"
+if [ -f "${ARDU_WS}/install/setup.bash" ]; then
+  source "${ARDU_WS}/install/setup.bash" 2>/dev/null || true
 fi
 
 echo "[1] Checking ROS2 topics containing 'wind'"

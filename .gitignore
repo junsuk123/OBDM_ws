@@ -10,11 +10,19 @@
 ## Logs and runtime
 /logs/
 /tmp/
+runtime/
 ardu_ws_local/build/
 ardu_ws_local/install/
 ardu_ws_local/log/
 ardu_ws_local/.colcon/
+ardu_ws/build/
+ardu_ws/install/
+ardu_ws/log/
+ardu_ws/.colcon/
+ardu_ws/src/**/.git/
+ardu_ws/mav*.parm
 matlab/logs/
+matlab/data/test/
 matlab/home/
 matlab/matlab/data/test/
 matlab/main/home/
@@ -28,7 +36,20 @@ matlab/modules/eeprom.bin
 scripts/__pycache__/
 *.log
 *.tlog*
+*.tlog.raw
 eeprom.bin
+terrain/
+*/terrain/
+**/terrain/
+*.BIN
+LASTLOG.TXT
+dumpcore*.out
+dumpstack*.out
+core
+core.*
+ardu_ws/[0-9]/
+simulation/[0-9]/
+simulation/**/__pycache__/
 
 ## OS
 .DS_Store
@@ -36,6 +57,7 @@ Thumbs.db
 
 ## Python/Other
 __pycache__/
+**/__pycache__/
 .pytest_cache/
 
 ## Node

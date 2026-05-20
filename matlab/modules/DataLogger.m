@@ -8,8 +8,10 @@ classdef DataLogger < handle
         timestamp_str
         traj_file
         wind_file
+        target_file
         traj_fid
         wind_fid
+        target_fid
         verbose = true
         start_time = 0
         ros_node
@@ -27,6 +29,10 @@ classdef DataLogger < handle
         latest_odom_row = []
         latest_odom_stamp = NaN
         last_logged_odom_stamp = NaN
+        sub_target
+        latest_target_row = []
+        latest_target_stamp = NaN
+        last_logged_target_stamp = NaN
     end
 
     methods
@@ -71,6 +77,7 @@ classdef DataLogger < handle
             % Set file paths
             obj.traj_file = fullfile(run_dir, 'trajectory.csv');
             obj.wind_file = fullfile(run_dir, 'wind.csv');
+            obj.target_file = fullfile(run_dir, 'landing_target.csv');
             
             % Initialize trajectory CSV with header
             try
@@ -100,6 +107,21 @@ classdef DataLogger < handle
                 end
             catch ME
                 warning('[DataLogger] Failed to init wind file: %s\n', ME.message);
+            end
+
+            % Initialize moving landing target CSV with header
+            try
+                obj.target_fid = fopen(obj.target_file, 'w');
+                if obj.target_fid > 0
+                    fprintf(obj.target_fid, 'time_s,target_x_m,target_y_m,target_z_m,target_vx_mps,target_vy_mps,target_vz_mps\n');
+                    fclose(obj.target_fid);
+                    obj.target_fid = -1;
+                    if obj.verbose
+                        fprintf('[DataLogger] Landing target file ready: %s\n', obj.target_file);
+                    end
+                end
+            catch ME
+                warning('[DataLogger] Failed to init landing target file: %s\n', ME.message);
             end
         end
 
@@ -135,6 +157,23 @@ classdef DataLogger < handle
             catch ME
                 if obj.verbose
                     fprintf('[DataLogger] Failed to log wind vector: %s\n', ME.message);
+                end
+            end
+        end
+
+        function log_landing_target(obj, time_s, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z)
+            % Append moving landing target state to CSV
+            try
+                obj.target_fid = fopen(obj.target_file, 'a');
+                if obj.target_fid > 0
+                    fprintf(obj.target_fid, '%.3f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n', ...
+                        time_s, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z);
+                    fclose(obj.target_fid);
+                    obj.target_fid = -1;
+                end
+            catch ME
+                if obj.verbose
+                    fprintf('[DataLogger] Failed to log landing target: %s\n', ME.message);
                 end
             end
         end
@@ -196,6 +235,20 @@ classdef DataLogger < handle
                         obj.sub_airspeed = [];
                     end
                 end
+
+                target_topic = '/landing_marker/odom';
+                try
+                    obj.sub_target = ros2subscriber(obj.ros_node, target_topic, 'nav_msgs/Odometry', @obj.callback_target, ...
+                        'Reliability', 'besteffort', 'Durability', 'volatile');
+                    if obj.verbose
+                        fprintf('[DataLogger] ✓ Subscribed to LANDING TARGET: %s\n', target_topic);
+                    end
+                catch ME
+                    if obj.verbose
+                        fprintf('[DataLogger] ⚠ LANDING TARGET subscribe failed: %s\n', ME.message);
+                    end
+                    obj.sub_target = [];
+                end
             catch ME
                 if obj.verbose
                     fprintf('[DataLogger] Subscription failed: %s\n', ME.message);
@@ -245,6 +298,16 @@ classdef DataLogger < handle
                     catch
                     end
                 end
+
+                if ~isempty(obj.latest_target_row) && isfinite(obj.latest_target_stamp) && obj.latest_target_stamp ~= obj.last_logged_target_stamp
+                    try
+                        obj.log_landing_target(elapsed_s, ...
+                            obj.latest_target_row(1), obj.latest_target_row(2), obj.latest_target_row(3), ...
+                            obj.latest_target_row(4), obj.latest_target_row(5), obj.latest_target_row(6));
+                        obj.last_logged_target_stamp = obj.latest_target_stamp;
+                    catch
+                    end
+                end
             catch
             end
         end
@@ -263,6 +326,7 @@ classdef DataLogger < handle
                 if ~isempty(obj.sub_odom), clear obj.sub_odom; end
                 if ~isempty(obj.sub_wind), clear obj.sub_wind; end
                 if ~isempty(obj.sub_airspeed), clear obj.sub_airspeed; end
+                if ~isempty(obj.sub_target), clear obj.sub_target; end
                 if ~isempty(obj.ros_node), clear obj.ros_node; end
             catch
             end
@@ -287,6 +351,10 @@ classdef DataLogger < handle
                     fclose(obj.wind_fid);
                     obj.wind_fid = -1;
                 end
+                if ~isempty(obj.target_fid) && obj.target_fid > 0
+                    fclose(obj.target_fid);
+                    obj.target_fid = -1;
+                end
                 
                 % Print summary
                 if obj.verbose
@@ -305,6 +373,14 @@ classdef DataLogger < handle
                             fprintf('[DataLogger] Wind vector samples: %d\n', height(wind_data));
                         catch
                             fprintf('[DataLogger] Wind vector file created\n');
+                        end
+                    end
+                    if isfile(obj.target_file)
+                        try
+                            target_data = readtable(obj.target_file);
+                            fprintf('[DataLogger] Landing target samples: %d\n', height(target_data));
+                        catch
+                            fprintf('[DataLogger] Landing target file created\n');
                         end
                     end
                 end
@@ -338,6 +414,20 @@ classdef DataLogger < handle
                     double(msg.pose.pose.position.y), ...
                     double(msg.pose.pose.position.z)];
                 obj.latest_odom_stamp = now;
+            catch
+            end
+        end
+
+        function callback_target(obj, msg)
+            try
+                obj.latest_target_row = [ ...
+                    double(msg.pose.pose.position.x), ...
+                    double(msg.pose.pose.position.y), ...
+                    double(msg.pose.pose.position.z), ...
+                    double(msg.twist.twist.linear.x), ...
+                    double(msg.twist.twist.linear.y), ...
+                    double(msg.twist.twist.linear.z)];
+                obj.latest_target_stamp = now;
             catch
             end
         end

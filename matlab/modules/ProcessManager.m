@@ -118,8 +118,12 @@ classdef ProcessManager
 				'topic_tools';
 				'parameter_bridge';
 				'ros_gz_bridge';
+				'robot_state_publisher';
+				'ros_gz_sim';
 				'gz_airspeed_to_ros2.py';
 				'gz_virtual_wind_sensor_to_ros2.py';
+				'aruco_landing_target_node.py';
+				'aruco_camera_detector_node.py';
 			};
 			obj = obj.terminate_process_patterns(relay_patterns, 'ROS2 relay', 1);
 		end

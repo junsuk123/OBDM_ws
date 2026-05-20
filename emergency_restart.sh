@@ -67,7 +67,7 @@ echo ""
 log_info "Step 2: Verifying ROS2 environment..."
 source /opt/ros/humble/setup.bash || true
 WS_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
-source ${WS_DIR}/ardu_ws_local/install/setup.bash || true
+source ${WS_DIR}/ardu_ws/install/setup.bash || true
 export ROS_DOMAIN_ID=0
 export GZ_VERSION=8  # Force Gazebo 8
 

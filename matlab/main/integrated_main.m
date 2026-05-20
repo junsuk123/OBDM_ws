@@ -1,7 +1,6 @@
 %% Integrated Main - Simple Orchestration
 % 각 기능 모듈을 조정하는 최상위 오케스트레이션 스크립트
-% 
-% ✅ 업데이트 (2026-05-11):
+%  
 %   - 공식 ArduPilot Gazebo 패키지 사용 (iris_runway.launch.py)
 %   - 포트 정리 및 환경 변수 자동 설정 (ROS_DOMAIN_ID, GZ_VERSION)
 %   - /iris 네임스페이스 자동 감지 및 모든 센서 토픽 지원
@@ -114,13 +113,23 @@ try
     vis_mod = [];
     collector_mod = [];
     wind_mod = [];
+    adverse_mod = [];
+    target_mod = [];
     airspeed_bridge_pid = '';
     virtual_wind_pid = '';
     world_name = getenv('OBDM_WORLD_NAME');
     if isempty(world_name)
         world_name = 'runway';
     end
-    cfg = struct('namespace', ns, 'verbose', true, 'base_dir', fullfile(pwd, 'matlab', 'data'), 'worldName', world_name);
+    adverse_preset = getenv('OBDM_ADVERSE_PRESET');
+    if isempty(adverse_preset)
+        adverse_preset = getenv('OBDM_WIND_PRESET');
+    end
+    if isempty(adverse_preset)
+        adverse_preset = 'calm';
+    end
+    cfg = struct('namespace', ns, 'verbose', true, 'base_dir', fullfile(pwd, 'matlab', 'data'), ...
+        'worldName', world_name, 'adversePreset', adverse_preset);
 
     try
         airspeed_bridge_pid = start_airspeed_bridge(ns, world_name);
@@ -146,6 +155,22 @@ try
         verify_gazebo_wind(world_name);
     catch ME
         fprintf('[integrated_main] Warning: WindControlModule failed: %s\n', ME.message);
+    end
+
+    try
+        target_mod = MovingLandingTargetModule();
+        target_mod.init(cfg);
+        target_mod.start();
+    catch ME
+        fprintf('[integrated_main] Warning: MovingLandingTargetModule failed: %s\n', ME.message);
+    end
+
+    try
+        adverse_mod = AdverseEnvironmentModule();
+        adverse_mod.init(cfg);
+        adverse_mod.start();
+    catch ME
+        fprintf('[integrated_main] Warning: AdverseEnvironmentModule failed: %s\n', ME.message);
     end
 
     try
@@ -209,7 +234,7 @@ try
     skip_control = getenv('OBDM_SKIP_CONTROL');
     if isempty(skip_control) || ~strcmpi(skip_control, '1')
         fprintf('═════════════════════════════════════\n');
-        fprintf('3️⃣ Control Test: Takeoff / Hover / Wind Course Flight\n');
+        fprintf('3️⃣ Control Test: ArUco Search / Track / Landing\n');
         fprintf('═════════════════════════════════════\n');
         fprintf('⏳ Pre-flight checks...\n\n');
         
@@ -242,44 +267,49 @@ try
         fprintf('\n');
             
             try
-                controller = CircleControlModule('namespace', ns, 'verbose', true);
-                controller = controller.initialize();
+                mission_type = getenv('OBDM_MISSION');
+                if isempty(mission_type)
+                    mission_type = 'aruco_landing';
+                end
                 fprintf('\n');
-                
-                % Execute flight control with explicit error handling
-                success = controller.execute_circle_flight(...
-                    'course_type', 'wind_test', ...
-                    'altitude_agl_m', 5, ...
-                    'straight_length_m', 35, ...
-                    'climb_height_m', 8, ...
-                    'descent_forward_m', 35, ...
-                    'descent_lateral_m', 18, ...
-                    'straight_points', 6, ...
-                    'climb_points', 4, ...
-                    'descent_points', 6, ...
-                    'return_curve_points', 12, ...
-                    'waypoint_spacing_m', 3, ...
-                    'smooth_interpolation', true, ...
-                    'tolerance_m', 4, ...
-                    'waypoint_timeout_s', 18, ...
-                    'land_at_end', true, ...
-                    'landing_timeout_s', 45, ...
-                    'hover_duration_s', 2, ...
-                    'hover_tolerance_m', 5, ...
-                    'sample_interval_s', 0.5);
-                
-                % Check if flight control completed or failed
-                flight_log = controller.get_flight_log();
-                waypoints_local = controller.get_last_waypoints_local();
-                
-                if success
-                    fprintf('\n✓ Wind course flight completed successfully\n');
-                    if ~isempty(flight_log) && isfield(flight_log, 'time_s') && ~isempty(flight_log.time_s)
-                        plot_control_trajectory(flight_log, waypoints_local, ns);
+
+                if strcmpi(mission_type, 'aruco_landing')
+                    controller = ArucoLandingControlModule('namespace', ns, 'verbose', true);
+                    controller = controller.initialize();
+                    success = controller.execute(...
+                        'takeoff_alt_m', 5, ...
+                        'search_alt_step_m', 1.0, ...
+                        'max_search_alt_m', 12.0, ...
+                        'search_timeout_s', 45, ...
+                        'min_marker_samples', 5, ...
+                        'tracking_timeout_s', 60, ...
+                        'tracking_interval_s', 1.0, ...
+                        'descent_step_m', 0.45, ...
+                        'landing_alt_m', 0.8, ...
+                        'landing_timeout_s', 45);
+                    flight_log = controller.get_flight_log();
+                    if success
+                        fprintf('\n✓ ArUco landing mission completed successfully\n');
+                        if ~isempty(flight_log) && isfield(flight_log, 'time_s') && ~isempty(flight_log.time_s)
+                            plot_aruco_landing_trajectory(flight_log, ns);
+                        end
+                    else
+                        fprintf('\n✗ ArUco landing mission failed to complete (success=false)\n');
                     end
                 else
-                    fprintf('\n✗ Wind course flight failed to complete (success=false)\n');
-                    fprintf('   Check error messages above for details\n');
+                    controller = CircleControlModule('namespace', ns, 'verbose', true);
+                    controller = controller.initialize();
+                    success = controller.execute_circle_flight(...
+                        'course_type', 'wind_test', ...
+                        'altitude_agl_m', 5, ...
+                        'waypoint_spacing_m', 3, ...
+                        'smooth_interpolation', true, ...
+                        'land_at_end', true);
+                    flight_log = controller.get_flight_log();
+                    waypoints_local = controller.get_last_waypoints_local();
+                    if success && ~isempty(flight_log) && isfield(flight_log, 'time_s') && ~isempty(flight_log.time_s)
+                        plot_control_trajectory(flight_log, waypoints_local, ns);
+                    end
                 end
                 
                 controller.cleanup();
@@ -353,6 +383,18 @@ try
         end
     catch
     end
+    try
+        if exist('adverse_mod', 'var') && ~isempty(adverse_mod)
+            adverse_mod.cleanup();
+        end
+    catch
+    end
+    try
+        if exist('target_mod', 'var') && ~isempty(target_mod)
+            target_mod.cleanup();
+        end
+    catch
+    end
     if strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
         fprintf('[integrated_main] Airspeed relay left running with simulation (PID: %s)\n', strtrim(airspeed_bridge_pid));
         fprintf('[integrated_main] Virtual wind sensor left running with simulation (PID: %s)\n', strtrim(virtual_wind_pid));
@@ -392,6 +434,15 @@ catch ME
     catch
     end
     try
+        if exist('adverse_mod', 'var') && ~isempty(adverse_mod)
+            adverse_mod.cleanup();
+        end
+        if exist('target_mod', 'var') && ~isempty(target_mod)
+            target_mod.cleanup();
+        end
+    catch
+    end
+    try
         if exist('airspeed_bridge_pid', 'var') && ~strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
             stop_background_pid(airspeed_bridge_pid, 'Airspeed relay');
         end
@@ -406,6 +457,7 @@ function pid = start_airspeed_bridge(ns, world_name)
     pid = '';
     repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
     script_path = fullfile(repo_root, 'scripts', 'gz_airspeed_to_ros2.py');
+    ardu_ws = SimulationConfig.get_ardu_ws_path();
     robot_name = regexprep(ns, '^/', '');
     if isempty(robot_name)
         robot_name = 'iris';
@@ -413,10 +465,10 @@ function pid = start_airspeed_bridge(ns, world_name)
 
     log_file = '/tmp/obdm_airspeed_bridge.log';
     cmd = sprintf(['bash -lc ''source /opt/ros/humble/setup.bash; ' ...
-        'if [ -f /home/j/ardu_ws/install/setup.bash ]; then source /home/j/ardu_ws/install/setup.bash; fi; ' ...
+        'if [ -f "%s/install/setup.bash" ]; then source "%s/install/setup.bash"; fi; ' ...
         'export ROS_DOMAIN_ID=0; export GZ_VERSION=harmonic; ' ...
         'setsid python3 "%s" --namespace "%s" --world "%s" --robot "%s" --rate 5 > "%s" 2>&1 < /dev/null & echo $!'''], ...
-        script_path, ns, world_name, robot_name, log_file);
+        ardu_ws, ardu_ws, script_path, ns, world_name, robot_name, log_file);
     [status, output] = system(cmd);
     if status == 0
         pid = strtrim(output);
@@ -430,6 +482,7 @@ function pid = start_virtual_wind_sensor(ns, world_name)
     pid = '';
     repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
     script_path = fullfile(repo_root, 'scripts', 'gz_virtual_wind_sensor_to_ros2.py');
+    ardu_ws = SimulationConfig.get_ardu_ws_path();
     robot_name = regexprep(ns, '^/', '');
     if isempty(robot_name)
         robot_name = 'iris';
@@ -437,10 +490,10 @@ function pid = start_virtual_wind_sensor(ns, world_name)
 
     log_file = '/tmp/obdm_virtual_wind_sensor.log';
     cmd = sprintf(['bash -lc ''source /opt/ros/humble/setup.bash; ' ...
-        'if [ -f /home/j/ardu_ws/install/setup.bash ]; then source /home/j/ardu_ws/install/setup.bash; fi; ' ...
+        'if [ -f "%s/install/setup.bash" ]; then source "%s/install/setup.bash"; fi; ' ...
         'export ROS_DOMAIN_ID=0; export GZ_VERSION=harmonic; ' ...
         'setsid python3 "%s" --namespace "%s" --world "%s" --robot "%s" --rate 5 > "%s" 2>&1 < /dev/null & echo $!'''], ...
-        script_path, ns, world_name, robot_name, log_file);
+        ardu_ws, ardu_ws, script_path, ns, world_name, robot_name, log_file);
     [status, output] = system(cmd);
     if status == 0
         pid = strtrim(output);
@@ -610,6 +663,33 @@ function add_wind_arrows(ax, x, y, z, wind_vec, wind_mag)
     end
 end
 
+function plot_aruco_landing_trajectory(flight_log, ns)
+    if nargin < 2 || isempty(ns)
+        ns = '/iris';
+    end
+    try
+        figure('Name', sprintf('OBDM ArUco Landing (%s)', ns), 'NumberTitle', 'off', 'Color', 'w');
+        hold on; grid on; axis equal; view(3);
+        plot3(flight_log.x, flight_log.y, flight_log.z, 'b.-', 'LineWidth', 1.2, 'MarkerSize', 12);
+        plot3(flight_log.target_x, flight_log.target_y, flight_log.target_z, 'm--o', 'LineWidth', 1.0, 'MarkerSize', 4);
+        valid_marker = isfinite(flight_log.marker_x);
+        if any(valid_marker)
+            scatter3(flight_log.marker_x(valid_marker), flight_log.marker_y(valid_marker), flight_log.marker_z(valid_marker), 36, 'r', 'filled');
+            quiver3(flight_log.marker_x(valid_marker), flight_log.marker_y(valid_marker), flight_log.marker_z(valid_marker), ...
+                flight_log.marker_vx(valid_marker), flight_log.marker_vy(valid_marker), flight_log.marker_vz(valid_marker), ...
+                0.8, 'Color', [0.65 0.1 0.1], 'LineWidth', 1.0);
+        end
+        xlabel('World X / east-like (m)');
+        ylabel('World Y / north-forward (m)');
+        zlabel('Z / altitude (m)');
+        title(sprintf('Moving ArUco Landing Target Tracking: %s', ns), 'Interpreter', 'none');
+        legend({'Drone trajectory', 'Commanded waypoints', 'Marker position', 'Marker velocity'}, 'Location', 'best');
+        hold off;
+    catch ME
+        fprintf('[plot_aruco_landing_trajectory] skipped: %s\n', ME.message);
+    end
+end
+
 function perform_landing(ns)
     % Best-effort landing helper using pymavlink. Attempts to set mode LAND and disarm.
     if nargin < 1 || isempty(ns), ns = '/iris'; end
@@ -619,59 +699,62 @@ function perform_landing(ns)
         if fid < 0
             error('Cannot create temporary pymavlink script');
         end
+        cleaner = onCleanup(@() delete_temp_file(py_file)); %#ok<NASGU>
         % Try common URIs
-        uris = ["tcp:127.0.0.1:5760", "udp:127.0.0.1:14550", "tcp:127.0.0.1:5770", "udp:127.0.0.1:14650"];
-        py_uris = '[' + string(join(uris, ', ')) + ']';
-        script = sprintf([ ...
-            'import time, sys\n'
-            'from pymavlink import mavutil\n'
-            'uris = %s\n'
-            'm = None\n'
-            'for uri in uris:\n'
-            '    try:\n'
-            '        m = mavutil.mavlink_connection(uri, source_system=251, timeout=8)\n'
-            '        m.wait_heartbeat(timeout=8)\n'
-            '        break\n'
-            '    except Exception:\n'
-            '        m = None\n'
-            'if m is None:\n'
-            '    print("NO_MAVLINK")\n'
-            '    sys.exit(2)\n'
-            'try:\n'
-            '    m.set_mode("LAND")\n'
-            '    t0 = time.time()\n'
-            '    while time.time() - t0 < 15:\n'
-            '        m.recv_match(type="HEARTBEAT", blocking=True, timeout=1)\n'
-            '        if str(m.flightmode).upper() == "LAND":\n'
-            '            break\n'
-            '        time.sleep(0.5)\n'
-            '    low_alt_count = 0\n'
-            '    t1 = time.time()\n'
-            '    while time.time() - t1 < 45:\n'
-            '        msg = m.recv_match(type=["GLOBAL_POSITION_INT", "LOCAL_POSITION_NED", "HEARTBEAT"], blocking=True, timeout=1)\n'
-            '        if msg is None:\n'
-            '            continue\n'
-            '        if msg.get_type() == "GLOBAL_POSITION_INT":\n'
-            '            rel_alt_m = float(msg.relative_alt) / 1000.0\n'
-            '            print(f"LAND_MONITOR rel_alt={rel_alt_m:.2f}")\n'
-            '            if rel_alt_m <= 0.35:\n'
-            '                low_alt_count += 1\n'
-            '            else:\n'
-            '                low_alt_count = 0\n'
-            '        elif msg.get_type() == "LOCAL_POSITION_NED":\n'
-            '            z_m = abs(float(msg.z))\n'
-            '            print(f"LAND_MONITOR z_abs={z_m:.2f}")\n'
-            '            if z_m <= 0.35:\n'
-            '                low_alt_count += 1\n'
-            '            else:\n'
-            '                low_alt_count = 0\n'
-            '        if low_alt_count >= 3:\n'
-            '            break\n'
-            '    m.arducopter_disarm()\n'
-            '    print("LAND_OK")\n'
-            'except Exception as e:\n'
-            '    print("LAND_FAIL", e)\n'
-            '    sys.exit(3)\n'], py_uris);
+        uris = {'tcp:127.0.0.1:5760', 'udp:127.0.0.1:14550', 'tcp:127.0.0.1:5770', 'udp:127.0.0.1:14650'};
+        py_uris = ['[', strjoin(cellfun(@(u)sprintf('"%s"', u), uris, 'UniformOutput', false), ', '), ']'];
+        script_lines = { ...
+            'import time, sys', ...
+            'from pymavlink import mavutil', ...
+            sprintf('uris = %s', py_uris), ...
+            'm = None', ...
+            'for uri in uris:', ...
+            '    try:', ...
+            '        m = mavutil.mavlink_connection(uri, source_system=251, timeout=8)', ...
+            '        m.wait_heartbeat(timeout=8)', ...
+            '        break', ...
+            '    except Exception:', ...
+            '        m = None', ...
+            'if m is None:', ...
+            '    print("NO_MAVLINK")', ...
+            '    sys.exit(2)', ...
+            'try:', ...
+            '    m.set_mode("LAND")', ...
+            '    t0 = time.time()', ...
+            '    while time.time() - t0 < 15:', ...
+            '        m.recv_match(type="HEARTBEAT", blocking=True, timeout=1)', ...
+            '        if str(m.flightmode).upper() == "LAND":', ...
+            '            break', ...
+            '        time.sleep(0.5)', ...
+            '    low_alt_count = 0', ...
+            '    t1 = time.time()', ...
+            '    while time.time() - t1 < 45:', ...
+            '        msg = m.recv_match(type=["GLOBAL_POSITION_INT", "LOCAL_POSITION_NED", "HEARTBEAT"], blocking=True, timeout=1)', ...
+            '        if msg is None:', ...
+            '            continue', ...
+            '        if msg.get_type() == "GLOBAL_POSITION_INT":', ...
+            '            rel_alt_m = float(msg.relative_alt) / 1000.0', ...
+            '            print(f"LAND_MONITOR rel_alt={rel_alt_m:.2f}")', ...
+            '            if rel_alt_m <= 0.35:', ...
+            '                low_alt_count += 1', ...
+            '            else:', ...
+            '                low_alt_count = 0', ...
+            '        elif msg.get_type() == "LOCAL_POSITION_NED":', ...
+            '            z_m = abs(float(msg.z))', ...
+            '            print(f"LAND_MONITOR z_abs={z_m:.2f}")', ...
+            '            if z_m <= 0.35:', ...
+            '                low_alt_count += 1', ...
+            '            else:', ...
+            '                low_alt_count = 0', ...
+            '        if low_alt_count >= 3:', ...
+            '            break', ...
+            '    m.arducopter_disarm()', ...
+            '    print("LAND_OK")', ...
+            'except Exception as e:', ...
+            '    print("LAND_FAIL", e)', ...
+            '    sys.exit(3)' ...
+        };
+        script = [strjoin(script_lines, newline), newline];
         fwrite(fid, script, 'char'); fclose(fid);
         cmd = sprintf('python3 "%s" 2>&1', py_file);
         [status, out] = system(cmd);
@@ -682,5 +765,14 @@ function perform_landing(ns)
         end
     catch ME
         fprintf('[perform_landing] Exception: %s\n', ME.message);
+    end
+end
+
+function delete_temp_file(file_path)
+    try
+        if exist(file_path, 'file')
+            delete(file_path);
+        end
+    catch
     end
 end

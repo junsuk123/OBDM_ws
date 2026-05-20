@@ -3,7 +3,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROS2_WS="/home/j/ardu_ws"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROS2_WS="${OBDM_ARDU_WS:-${REPO_ROOT}/ardu_ws}"
 
 echo "Starting ArduCopter Gazebo launch..."
 

@@ -4,7 +4,7 @@
 clear all; close all; clc;
 
 ws_root = pwd; % Current workspace directory
-msg_gen_path = fullfile(ws_root, 'ardu_ws_local', 'src', 'ardupilot', 'Tools', 'ros2', 'matlab_msg_gen');
+msg_gen_path = fullfile(ws_root, 'ardu_ws', 'src', 'ardupilot', 'Tools', 'ros2', 'matlab_msg_gen');
 pkg_names = {'ardupilot_msgs'};
 
 fprintf('═════════════════════════════════════\n');

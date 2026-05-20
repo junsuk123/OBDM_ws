@@ -30,6 +30,7 @@ classdef RealtimeVisualizer < handle
         timer_obj
         verbose = true
         start_tic
+        is_drawing = false
     end
 
     methods
@@ -157,6 +158,11 @@ classdef RealtimeVisualizer < handle
 
         function update_once(obj)
             try
+                if obj.is_drawing
+                    return;
+                end
+                obj.is_drawing = true;
+                cleanup_draw = onCleanup(@() obj.set_drawing(false)); %#ok<NASGU>
                 elapsed_s = toc(obj.start_tic);
                 
                 % Subscriber callbacks collect samples; this timer only redraws.
@@ -164,16 +170,17 @@ classdef RealtimeVisualizer < handle
                 % Update plots if figure still valid
                 if ~isempty(obj.fig) && isvalid(obj.fig)
                     try
-                        if ~isempty(obj.traj_x)
-                            set(obj.h_traj, 'XData', obj.traj_x, 'YData', obj.traj_y, 'ZData', obj.traj_z);
-                            obj.update_wind_overlay();
+                        [x, y, z, speeds, vecs] = obj.snapshot_plot_data();
+                        if ~isempty(x)
+                            set(obj.h_traj, 'XData', x, 'YData', y, 'ZData', z);
+                            obj.update_wind_overlay(x, y, z, speeds, vecs);
                         end
                         
                         % Update status text
                         status_str = sprintf(...
                             'Elapsed: %.1f s\nOdom msgs: %d\nWind msgs: %d\nTraj points: %d\nWind samples: %d\nLatest wind: [%.2f %.2f %.2f] m/s\nWind mag: %.3f m/s\n\nStatus:\n', ...
                             elapsed_s, obj.odom_msg_count, obj.wind_msg_count, ...
-                            length(obj.traj_x), length(obj.wind_history), ...
+                            numel(x), length(obj.wind_history), ...
                             obj.latest_wind_vec(1), obj.latest_wind_vec(2), obj.latest_wind_vec(3), obj.latest_wind_mag);
                         
                         if isempty(obj.sub_odom)
@@ -203,6 +210,10 @@ classdef RealtimeVisualizer < handle
                 end
             catch
             end
+        end
+
+        function set_drawing(obj, value)
+            obj.is_drawing = value;
         end
 
         function stop(obj)
@@ -307,23 +318,63 @@ classdef RealtimeVisualizer < handle
             end
         end
 
-        function update_wind_overlay(obj)
+        function [x, y, z, speeds, vecs] = snapshot_plot_data(obj)
+            n = min([numel(obj.traj_x), numel(obj.traj_y), numel(obj.traj_z)]);
+            if n < 1
+                x = [];
+                y = [];
+                z = [];
+                speeds = [];
+                vecs = zeros(0, 3);
+                return;
+            end
+
+            x = obj.traj_x(1:n).';
+            y = obj.traj_y(1:n).';
+            z = obj.traj_z(1:n).';
+
+            speeds = obj.traj_wind_mag(:);
+            if numel(speeds) < n
+                speeds(end+1:n) = NaN;
+            elseif numel(speeds) > n
+                speeds = speeds(1:n);
+            end
+
+            vecs = obj.traj_wind_vec;
+            if isempty(vecs)
+                vecs = NaN(n, 3);
+            else
+                if size(vecs, 2) < 3
+                    vecs(:, end+1:3) = NaN;
+                elseif size(vecs, 2) > 3
+                    vecs = vecs(:, 1:3);
+                end
+                if size(vecs, 1) < n
+                    vecs(end+1:n, 1:3) = NaN;
+                elseif size(vecs, 1) > n
+                    vecs = vecs(1:n, :);
+                end
+            end
+        end
+
+        function update_wind_overlay(obj, x, y, z, speeds, vecs)
             try
-                n = numel(obj.traj_x);
+                n = min([numel(x), numel(y), numel(z), numel(speeds), size(vecs, 1)]);
                 if n < 1
                     return;
                 end
 
-                speeds = obj.traj_wind_mag;
-                if numel(speeds) < n
-                    speeds(end+1:n) = NaN;
-                end
+                x = x(1:n);
+                y = y(1:n);
+                z = z(1:n);
+                speeds = speeds(1:n);
+                vecs = vecs(1:n, 1:3);
                 if all(~isfinite(speeds))
-                    speeds = zeros(size(obj.traj_x));
+                    speeds = zeros(n, 1);
                 end
 
-                set(obj.h_air_scatter, 'XData', obj.traj_x, 'YData', obj.traj_y, ...
-                    'ZData', obj.traj_z, 'CData', speeds, 'SizeData', 28);
+                set(obj.h_air_scatter, 'XData', x, 'YData', y, ...
+                    'ZData', z, 'CData', speeds, 'SizeData', 28 * ones(n, 1));
                 finite_speeds = speeds(isfinite(speeds));
                 if ~isempty(finite_speeds)
                     clim(obj.ax_traj, [min(finite_speeds), max(finite_speeds) + eps]);
@@ -346,25 +397,25 @@ classdef RealtimeVisualizer < handle
                 if max_speed <= 0
                     max_speed = 1;
                 end
-                span = max([range(obj.traj_x), range(obj.traj_y), range(obj.traj_z), 1]);
+                span = max([range(x), range(y), range(z), 1]);
                 arrow_len = span * 0.08 * (0.25 + 0.75 * speed_vals ./ max_speed);
-                vecs = obj.traj_wind_vec;
-                if size(vecs, 1) < n
-                    vecs(end+1:n, 1:3) = NaN;
-                end
                 wind_norm = sqrt(sum(vecs(idx, :).^2, 2));
                 valid = wind_norm > 1e-6;
                 idx = idx(valid);
+                arrow_len = arrow_len(:);
                 arrow_len = arrow_len(valid);
                 wind_norm = wind_norm(valid);
                 if isempty(idx)
+                    set(obj.h_air_quiver, 'XData', NaN, 'YData', NaN, 'ZData', NaN, ...
+                        'UData', NaN, 'VData', NaN, 'WData', NaN);
                     return;
                 end
-                ux = vecs(idx, 1) ./ wind_norm .* arrow_len(:);
-                uy = vecs(idx, 2) ./ wind_norm .* arrow_len(:);
-                uz = vecs(idx, 3) ./ wind_norm .* arrow_len(:);
-                set(obj.h_air_quiver, 'XData', obj.traj_x(idx), 'YData', obj.traj_y(idx), ...
-                    'ZData', obj.traj_z(idx), 'UData', ux, 'VData', uy, 'WData', uz);
+                idx = idx(:);
+                ux = vecs(idx, 1) ./ wind_norm(:) .* arrow_len(:);
+                uy = vecs(idx, 2) ./ wind_norm(:) .* arrow_len(:);
+                uz = vecs(idx, 3) ./ wind_norm(:) .* arrow_len(:);
+                set(obj.h_air_quiver, 'XData', x(idx), 'YData', y(idx), ...
+                    'ZData', z(idx), 'UData', ux(:), 'VData', uy(:), 'WData', uz(:));
             catch
             end
         end

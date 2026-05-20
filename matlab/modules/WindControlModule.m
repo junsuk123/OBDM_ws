@@ -95,9 +95,9 @@ classdef WindControlModule < handle
                 case 'safe'
                     msg = single([1.5, 0, 0]);
                 case 'boundary'
-                    msg = single([4.0, 0, 0]);
+                    msg = single([2.0, 0, 0]);
                 case 'dangerous'
-                    msg = single([6.5, 0, 0]);
+                    msg = single([3.5, 0, 0]);
                 otherwise
                     msg = single([0, 0, 0]);
             end

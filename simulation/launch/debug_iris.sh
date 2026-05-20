@@ -5,7 +5,9 @@ set -e
 
 export ROS_DOMAIN_ID=0
 export GZ_VERSION=harmonic
-ROS2_WS="${HOME}/ardu_ws"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROS2_WS="${OBDM_ARDU_WS:-${REPO_ROOT}/ardu_ws}"
 
 source /opt/ros/humble/setup.bash
 if [ -f "$ROS2_WS/install/setup.bash" ]; then
