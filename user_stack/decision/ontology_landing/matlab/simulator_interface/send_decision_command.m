@@ -227,7 +227,8 @@ efficiency = clamp01(0.55 * semantic.energyEfficiency + 0.45 * semantic.timeEffi
 
 leadTimeMax = lerp(cfg.guidance.ontologyMinLeadTime, cfg.guidance.ontologyMaxLeadTime, ...
     clamp01(trackQuality * efficiency * (1.0 - 0.5 * risk)));
-leadTime = min(leadTimeMax, range / closingSpeed);
+leadDistanceGain = get_guidance_value(cfg, 'ontologyLeadDistanceGain', 0.0);
+leadTime = min(leadTimeMax, max(cfg.guidance.ontologyMinLeadTime, range / closingSpeed + leadDistanceGain * range));
 leadPoint = markerPosition(1:2) + markerVelocity(1:2) * leadTime;
 
 navGain = lerp(cfg.guidance.ontologyMinNavigationConstant, cfg.guidance.ontologyMaxNavigationConstant, ...
@@ -320,6 +321,16 @@ risk = clamp01(0.35 * semantic.windRisk + 0.25 * semantic.dragRisk + ...
 targetAltitude = uavState.position(3);
 if isfield(sim, 'guidance') && isfield(sim.guidance, 'lastTarget') && ~any(isnan(sim.guidance.lastTarget))
     holdTarget = sim.guidance.lastTarget;
+end
+searchAltitude = get_guidance_value(cfg, 'searchAltitude', cfg.simulator.takeoffAltitude);
+climbRate = get_guidance_value(cfg, 'markerLostClimbRate', 0.6);
+if targetAltitude < searchAltitude
+    timestamp = sim.truth.timestamp;
+    if isfield(uavState, 'timestamp')
+        timestamp = uavState.timestamp;
+    end
+    dt = guidance_descent_dt(sim, timestamp, cfg);
+    targetAltitude = min(searchAltitude, max(targetAltitude, holdTarget(3)) + climbRate * dt);
 end
 mode = 'ONTOLOGY_SEARCH_TRAJECTORY';
 trajectory = struct();
@@ -427,11 +438,12 @@ end
 
 function step = enforce_marker_closure_step(step, rel, range, cfg)
 if range <= cfg.guidance.finalLandRadius
+    step = rel;
     return;
 end
 direction = rel ./ max(range, eps);
 closingComponent = dot(step, direction);
-minStep = min(cfg.guidance.ontologyMinApproachStep, max(0.0, range - cfg.guidance.finalLandRadius));
+minStep = min(cfg.guidance.ontologyMinApproachStep, range);
 if closingComponent < minStep
     lateral = step - closingComponent * direction;
     step = lateral + minStep * direction;
@@ -452,9 +464,15 @@ if range <= eps
     return;
 end
 direction = rel ./ range;
-desiredStep = min(maxStep, max(cfg.guidance.ontologyMinApproachStep, ...
-    range - cfg.guidance.finalLandRadius));
+desiredStep = min(maxStep, range);
 step = desiredStep * direction;
+end
+
+function value = get_guidance_value(cfg, fieldName, defaultValue)
+value = defaultValue;
+if isfield(cfg, 'guidance') && isfield(cfg.guidance, fieldName) && ~isempty(cfg.guidance.(fieldName))
+    value = cfg.guidance.(fieldName);
+end
 end
 
 function prefix = clean_env_command_prefix()

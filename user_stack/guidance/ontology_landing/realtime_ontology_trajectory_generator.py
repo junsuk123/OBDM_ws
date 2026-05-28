@@ -136,8 +136,16 @@ class RealtimeOntologyTrajectoryGenerator:
 
         marker_age = max(0.0, marker_age)
         mx, my, mz, mvx, mvy, _ = self.predicted_marker_state(now)
-        mx = mx + mvx * min(marker_age, self.args.max_lead_time)
-        my = my + mvy * min(marker_age, self.args.max_lead_time)
+        dx = mx - self.drone["x"]
+        dy = my - self.drone["y"]
+        dist = math.hypot(dx, dy)
+        lead_time = clamp(
+            self.args.min_lead_time + dist * self.args.lead_distance_gain + marker_age,
+            self.args.min_lead_time,
+            self.args.max_lead_time,
+        )
+        mx = mx + mvx * lead_time
+        my = my + mvy * lead_time
         dx = mx - self.drone["x"]
         dy = my - self.drone["y"]
         dist = math.hypot(dx, dy)
@@ -153,7 +161,10 @@ class RealtimeOntologyTrajectoryGenerator:
                 self.args.min_step,
                 self.args.max_step,
             )
-            step = min(max_step, max(0.0, dist - self.args.final_radius))
+            if dist <= self.args.final_radius:
+                step = dist
+            else:
+                step = min(max_step, dist)
             tx = self.drone["x"] + dx / dist * step
             ty = self.drone["y"] + dy / dist * step
         else:
@@ -194,7 +205,8 @@ class RealtimeOntologyTrajectoryGenerator:
             self.node.get_logger().info(
                 f"setpoint#{self.setpoint_count} local_ned=({north:.2f},{east:.2f},{z_up:.2f}) "
                 f"drone=({self.drone['x']:.2f},{self.drone['y']:.2f},{self.drone['z']:.2f}) "
-                f"marker=({mx:.2f},{my:.2f},{mz:.2f}) dist={dist:.2f} marker_age={marker_age:.2f}"
+                f"marker=({mx:.2f},{my:.2f},{mz:.2f}) dist={dist:.2f} "
+                f"lead_time={lead_time:.2f} marker_age={marker_age:.2f}"
             )
             self.last_log_t = now
 
@@ -323,7 +335,7 @@ def main():
     parser.add_argument("--use-first-odom-origin", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--rate", type=float, default=10.0)
     parser.add_argument("--takeoff-altitude", type=float, default=5.0)
-    parser.add_argument("--search-altitude", type=float, default=5.0)
+    parser.add_argument("--search-altitude", type=float, default=7.0)
     parser.add_argument("--landing-start-altitude", type=float, default=4.0)
     parser.add_argument("--touchdown-altitude", type=float, default=0.35)
     parser.add_argument("--descent-rate", type=float, default=0.35)
@@ -334,18 +346,20 @@ def main():
     parser.add_argument("--descent-start-radius", type=float, default=2.2)
     parser.add_argument("--final-radius", type=float, default=0.35)
     parser.add_argument("--min-step", type=float, default=0.12)
-    parser.add_argument("--max-step", type=float, default=0.80)
-    parser.add_argument("--step-gain", type=float, default=0.35)
+    parser.add_argument("--max-step", type=float, default=2.20)
+    parser.add_argument("--step-gain", type=float, default=0.75)
     parser.add_argument("--fast-track-radius", type=float, default=0.75)
     parser.add_argument("--fast-track-gain", type=float, default=0.45)
     parser.add_argument("--fast-track-extra-step", type=float, default=0.55)
-    parser.add_argument("--xy-smoothing", type=float, default=0.55)
-    parser.add_argument("--max-lead-time", type=float, default=0.8)
+    parser.add_argument("--xy-smoothing", type=float, default=0.85)
+    parser.add_argument("--min-lead-time", type=float, default=0.8)
+    parser.add_argument("--lead-distance-gain", type=float, default=0.35)
+    parser.add_argument("--max-lead-time", type=float, default=3.5)
     parser.add_argument("--ekf-position-gain", type=float, default=0.55)
     parser.add_argument("--ekf-velocity-gain", type=float, default=0.20)
     parser.add_argument("--marker-timeout", type=float, default=0.5)
     parser.add_argument("--marker-lost-timeout", type=float, default=1.2)
-    parser.add_argument("--marker-lost-climb-rate", type=float, default=0.25)
+    parser.add_argument("--marker-lost-climb-rate", type=float, default=1.20)
     parser.add_argument("--marker-hold-timeout", type=float, default=5.0)
     parser.add_argument("--fallback-after", type=float, default=2.0)
     parser.add_argument("--log-period", type=float, default=1.0)
