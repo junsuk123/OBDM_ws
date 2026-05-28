@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<robot name="iris_rviz">
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.42 0.42 0.10"/></geometry>
+      <material name="body"><color rgba="0.08 0.10 0.12 1"/></material>
+    </visual>
+  </link>
+
+  <link name="imu_link">
+    <visual>
+      <geometry><box size="0.08 0.08 0.03"/></geometry>
+      <material name="imu"><color rgba="0.2 0.2 0.9 1"/></material>
+    </visual>
+  </link>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="0 0 0.02" rpy="0 0 0"/>
+  </joint>
+
+  <link name="gimbal_link">
+    <visual>
+      <geometry><box size="0.10 0.08 0.06"/></geometry>
+      <material name="gimbal"><color rgba="0.15 0.15 0.15 1"/></material>
+    </visual>
+  </link>
+  <joint name="gimbal_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="gimbal_link"/>
+    <origin xyz="0.10 0 -0.08" rpy="0 0 0"/>
+  </joint>
+
+  <link name="yaw_link">
+    <visual>
+      <geometry><box size="0.08 0.04 0.04"/></geometry>
+      <material name="gimbal_dark"><color rgba="0.05 0.05 0.05 1"/></material>
+    </visual>
+  </link>
+  <joint name="yaw_joint" type="fixed">
+    <parent link="gimbal_link"/>
+    <child link="yaw_link"/>
+    <origin xyz="0 0 -0.04" rpy="0 0 0"/>
+  </joint>
+
+  <link name="roll_link">
+    <visual>
+      <geometry><box size="0.06 0.04 0.04"/></geometry>
+      <material name="gimbal_mid"><color rgba="0.25 0.25 0.25 1"/></material>
+    </visual>
+  </link>
+  <joint name="roll_joint" type="fixed">
+    <parent link="yaw_link"/>
+    <child link="roll_link"/>
+    <origin xyz="0 0 -0.04" rpy="0 0 0"/>
+  </joint>
+
+  <link name="pitch_link">
+    <visual>
+      <geometry><cylinder radius="0.035" length="0.06"/></geometry>
+      <material name="camera"><color rgba="0.35 0.35 0.35 1"/></material>
+    </visual>
+  </link>
+  <joint name="pitch_joint" type="fixed">
+    <parent link="roll_link"/>
+    <child link="pitch_link"/>
+    <origin xyz="0 0 -0.04" rpy="1.57079632679 0 0"/>
+  </joint>
+
+  <link name="rotor_0"><visual><geometry><cylinder radius="0.10" length="0.01"/></geometry><material name="blue"><color rgba="0.1 0.25 1 1"/></material></visual></link>
+  <joint name="rotor_0_joint" type="fixed"><parent link="base_link"/><child link="rotor_0"/><origin xyz="0.13 -0.22 0.023" rpy="0 0 0"/></joint>
+  <link name="rotor_1"><visual><geometry><cylinder radius="0.10" length="0.01"/></geometry><material name="blue"/></visual></link>
+  <joint name="rotor_1_joint" type="fixed"><parent link="base_link"/><child link="rotor_1"/><origin xyz="-0.13 0.20 0.023" rpy="0 0 0"/></joint>
+  <link name="rotor_2"><visual><geometry><cylinder radius="0.10" length="0.01"/></geometry><material name="green"><color rgba="0.1 0.9 0.2 1"/></material></visual></link>
+  <joint name="rotor_2_joint" type="fixed"><parent link="base_link"/><child link="rotor_2"/><origin xyz="0.13 0.22 0.023" rpy="0 0 0"/></joint>
+  <link name="rotor_3"><visual><geometry><cylinder radius="0.10" length="0.01"/></geometry><material name="green"/></visual></link>
+  <joint name="rotor_3_joint" type="fixed"><parent link="base_link"/><child link="rotor_3"/><origin xyz="-0.13 -0.20 0.023" rpy="0 0 0"/></joint>
+</robot>

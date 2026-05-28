@@ -4,7 +4,8 @@
 
 set -e
 
-WORKSPACE_DIR="/home/j/SynologyDrive/INCSL/devel/INCSL/OBDM_ws"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_DIR="${SCRIPT_DIR}"
 LOG_DIR="/tmp/obdm_verification"
 mkdir -p "$LOG_DIR"
 
@@ -27,7 +28,6 @@ echo ""
 # Setup environment
 echo "[2/3] Running data collection test..."
 source /opt/ros/humble/setup.bash || true
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARDU_WS="${OBDM_ARDU_WS:-${SCRIPT_DIR}/ardu_ws}"
 source "${ARDU_WS}/install/setup.bash" || true
 export ROS_DOMAIN_ID=0

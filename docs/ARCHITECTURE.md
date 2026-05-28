@@ -1,57 +1,61 @@
 # Architecture
 
-## Runtime Stack
+## Design Rule
 
-- Gazebo Sim 8 / Harmonic world and models live under `ardu_ws/src`.
-- ROS 2 launch is provided by `ardupilot_gz_bringup`.
-- ArduPilot SITL is controlled from MATLAB through MAVLink fallback helpers.
-- MATLAB modules in `matlab/modules` coordinate simulation startup, data logging, wind control, target motion, visualization, and landing control.
-- Python helper nodes in `scripts` bridge Gazebo wind/airspeed data and publish the moving ArUco landing target state.
+The simulator core should be reusable and stable. User algorithms should be replaceable. Scenarios should be config-driven. Runtime outputs should stay out of source directories.
 
-## Active MATLAB Entry Points
-
-- `matlab/main/integrated_main.m`: main integration run.
-- `matlab/config/SimulationConfig.m`: repo-local paths and launch configuration.
-- `matlab/modules/SimulationManager.m`: Gazebo / ROS 2 launch orchestration.
-- `matlab/modules/ArucoLandingControlModule.m`: ArUco search, tracking, waypoint generation, landing sequence.
-- `matlab/modules/AdverseEnvironmentModule.m`: wind scenario updates.
-- `matlab/modules/MovingLandingTargetModule.m`: launches the moving target helper.
-- `matlab/modules/DataLogger.m`: trajectory, wind, and target CSV logging.
-- `matlab/modules/RealtimeVisualizer.m`: live trajectory plot with wind vector overlay.
-
-## Data Flow
+## Current Integrated Runtime
 
 ```text
-Gazebo world wind
-  -> Gazebo /world/runway/wind
-  -> scripts/gz_virtual_wind_sensor_to_ros2.py
-  -> /iris/wind_sensor
-  -> MATLAB DataLogger / RealtimeVisualizer
-
-Moving ArUco target
-  -> scripts/aruco_landing_target_node.py
-  -> /landing_marker/odom
-  -> MATLAB logger and landing controller
-
-Drone state
-  -> /iris/odometry, /iris/navsat, /iris/imu, /iris/air_speed
-  -> MATLAB logger, visualizer, controller
+user_stack/decision/ontology_landing/matlab/main.m
+  -> config/default_config.m
+  -> simulator_interface/initSimulator.m
+  -> simulator_interface/initialize_landing_simulation.m
+  -> matlab/core/SimulationManager.m
+  -> ros2 launch ardupilot_gz_bringup iris_runway.launch.py
+  -> matlab/modules/guidance/MovingLandingTargetModule.m
+  -> role-based Python helper nodes under user_stack/, bridges/, and simulator/
+  -> ontology feature fusion, decision model, labeling, evaluation, plots
 ```
 
-## Coordinate Convention
+The integrated scenario currently combines simulator core, bridge layer, and user algorithm stack through MATLAB path lookup. This works, but the refactor target is to separate those roles.
 
-MATLAB path generation, logging, plotting, and landing target estimates use one world frame:
+## Current Component Boundaries
 
-- `x`: Gazebo / ROS world X
-- `y`: Gazebo / ROS world Y
-- `z`: altitude up
+Simulator core:
 
-Only the MAVLink command boundary converts this to ArduPilot `LOCAL_NED`:
+- `ardu_ws/src/ardupilot_gz`: Gazebo worlds, models, bringup launch files.
+- `simulator/rviz/ruiz.rviz`: RViz visualization configuration used by the integrated landing run.
+- `matlab/core/SimulationManager.m`, `ROS2Manager.m`, `ProcessManager.m`: runtime orchestration and cleanup.
 
-- `north = world_y`
-- `east = world_x`
-- `down = -world_z`
+Bridge layer:
 
-The camera detector uses OpenCV optical coordinates internally (`x` right, `y` down, `z` forward), then converts the marker estimate back into the same world frame before publishing `/landing_marker/odom`.
+- `ros_gz_bridge parameter_bridge` launched from `MovingLandingTargetModule.m`.
+- `bridges/ros_gz/gz_virtual_wind_sensor_to_ros2.py`: Gazebo wind and vehicle velocity to ROS 2 wind topics.
+- `bridges/mavlink/mavlink_guidance_streamer.py`: ROS 2 guidance target to MAVLink control path.
+- `user_stack/decision/ontology_landing/matlab/simulator_interface/*`: MATLAB to ROS 2/Gazebo/MAVLink adapter.
 
-The drone camera is configured as a fixed front-down camera. The detector assumes a 55 degree downward pitch when converting ArUco pose estimates to world coordinates.
+User algorithm stack:
+
+- `user_stack/perception/aruco/aruco_camera_detector_node.py`: ArUco perception and inferred pad-center estimate.
+- `user_stack/guidance/ontology_landing/realtime_ontology_trajectory_generator.py`: landing trajectory generation.
+- `user_stack/decision/ontology_landing/matlab/ontology_features`, `feature_fusion`, `decision_model`, `labeling`: ontology landing decision stack.
+
+Evaluation and logging:
+
+- `user_stack/decision/ontology_landing/matlab/evaluation`
+- `user_stack/decision/ontology_landing/matlab/visualization`
+- per-run outputs under `user_stack/decision/ontology_landing/matlab/results/<timestamp>/`
+
+## Target Boundary
+
+```text
+simulator/   Gazebo, models, launch, descriptions, RViz, reusable visualization
+bridges/     ROS-Gazebo, MAVLink, ArduPilot, MATLAB adapters
+user_stack/  Replaceable perception, decision, guidance, and control algorithms
+scenarios/   YAML scenario definitions
+config/      Vehicle, sensor, environment, autopilot, user-stack, and evaluation config
+results/     Logs, rosbags, ArduPilot logs, MATLAB logs, plots, reports, runtime
+```
+
+The staged plan keeps the existing runtime paths intact first, then migrates file groups only after dependency references are updated.

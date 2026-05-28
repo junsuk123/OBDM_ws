@@ -1,7 +1,8 @@
 %% Diagnostic test to capture Python MAVLink sequence output
 
-cd '/home/j/SynologyDrive/INCSL/devel/INCSL/OBDM_ws'
-addpath(genpath('matlab'))
+repoRoot = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+cd(repoRoot)
+addpath(genpath(fullfile(repoRoot, 'matlab')))
 
 % Create a test Python script that shows what the arm_mode_takeoff_sequence is doing
 altitude_m = 1.0;

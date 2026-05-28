@@ -259,7 +259,7 @@ run example_receive_state.m
 ```matlab
 % 시뮬레이션과 함께 실행
 % 터미널 1: 시뮬레이션 실행
-% cd ~/OBDM_ws/simulation && ./run_simulation.sh
+% cd ~/OBDM_ws && ./scripts/system/run_simulation.sh
 
 % MATLAB: 모니터링 스크립트 실행
 cd ~/OBDM_ws/matlab

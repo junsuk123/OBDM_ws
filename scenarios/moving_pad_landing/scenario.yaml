@@ -1,0 +1,10 @@
+name: moving_pad_landing
+description: Moving landing pad scenario. Currently implemented through the ontology_landing integrated entrypoint.
+entrypoint: user_stack/decision/ontology_landing/matlab/main.m
+user_stack: ontology_landing
+world: runway
+landing_pad:
+  model: r1_rover
+  motion_mode: line
+  motion_range_m: 1.0
+  target_speed_mps: 0.25

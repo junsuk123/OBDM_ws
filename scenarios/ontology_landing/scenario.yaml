@@ -1,0 +1,39 @@
+name: ontology_landing
+description: Integrated moving-pad ArUco landing with generated wind, RViz visualization, touchdown termination, and MATLAB evaluation.
+entrypoint: user_stack/decision/ontology_landing/matlab/main.m
+user_stack: ontology_landing
+world: runway
+vehicle:
+  model: iris
+  namespace: /iris
+simulator:
+  launcher: ardupilot_gz_bringup/iris_runway.launch.py
+  rviz_config: simulator/rviz/ruiz.rviz
+landing_pad:
+  model: r1_rover
+  motion_mode: line
+  motion_range_m: 1.0
+  target_speed_mps: 0.25
+aruco:
+  center_marker_id: 0
+  marker_sizes_m:
+    0: 0.42
+    1: 0.20
+    2: 0.20
+    3: 0.20
+    4: 0.20
+    5: 0.12
+    6: 0.12
+    7: 0.12
+    8: 0.12
+wind:
+  source: matlab_generated_and_gazebo_published
+  gazebo_topic: /world/runway/wind
+  ros_topics:
+    - /iris/wind_world
+    - /iris/wind_sensor
+    - /iris/wind_arrow
+evaluation:
+  stop_on_touchdown: true
+  metrics_csv: metrics.csv
+  summary_txt: summary.txt

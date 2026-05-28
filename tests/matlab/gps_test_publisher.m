@@ -6,7 +6,8 @@ fprintf('╔══════════════════════�
 fprintf('║   GPS Test Data Publisher      ║\n');
 fprintf('╚════════════════════════════════╝\n\n');
 
-addpath(genpath(fullfile(pwd, 'ardu_ws', 'src', 'ardupilot', 'Tools', 'ros2', 'matlab_msg_gen')));
+repoRoot = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+addpath(genpath(fullfile(repoRoot, 'ardu_ws', 'src', 'ardupilot', 'Tools', 'ros2', 'matlab_msg_gen')));
 
 try
     % ROS2 노드 생성

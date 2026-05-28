@@ -1,6 +1,7 @@
 %% GPS Direct Subscriber Test
 clear; clc;
-addpath(genpath(fullfile(pwd, 'ardu_ws', 'src', 'ardupilot', 'Tools', 'ros2', 'matlab_msg_gen')));
+repoRoot = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+addpath(genpath(fullfile(repoRoot, 'ardu_ws', 'src', 'ardupilot', 'Tools', 'ros2', 'matlab_msg_gen')));
 
 fprintf('=== GPS ROS2 Subscriber Test ===\n\n');
 

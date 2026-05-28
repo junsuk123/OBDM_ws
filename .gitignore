@@ -3,14 +3,21 @@
 *.m~
 *.mex*
 *.p
-.mat
-.fig
+*.mat
+*.fig
 /.history
 
 ## Logs and runtime
 /logs/
 /tmp/
 runtime/
+results/logs/
+results/rosbags/
+results/ardupilot_logs/
+results/matlab_logs/
+results/runtime/
+results/plots/
+results/reports/
 ardu_ws_local/build/
 ardu_ws_local/install/
 ardu_ws_local/log/
@@ -35,6 +42,7 @@ matlab/modules/*.tlog*
 matlab/modules/eeprom.bin
 scripts/__pycache__/
 *.log
+*.pyc
 *.tlog*
 *.tlog.raw
 eeprom.bin
@@ -50,6 +58,11 @@ core.*
 ardu_ws/[0-9]/
 simulation/[0-9]/
 simulation/**/__pycache__/
+user_stack/decision/ontology_landing/matlab/results/
+user_stack/decision/ontology_landing/matlab/logs/
+user_stack/decision/ontology_landing/matlab/*.tlog*
+user_stack/decision/ontology_landing/matlab/eeprom.bin
+user_stack/decision/ontology_landing/matlab/mav.parm
 
 ## OS
 .DS_Store

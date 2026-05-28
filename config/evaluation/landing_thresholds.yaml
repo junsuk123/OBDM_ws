@@ -1,0 +1,8 @@
+touchdown:
+  altitude_m: 0.35
+  xy_tolerance_m: 0.75
+  max_abs_vertical_speed_mps: 1.0
+decision:
+  min_training_samples: 8
+logging:
+  save_plots: true

@@ -1,7 +1,8 @@
 %% Test DataCollectionModule GPS Publisher
 clear; clc;
-addpath(genpath('/home/j/SynologyDrive/INCSL/devel/INCSL/OBDM_ws/matlab'));
-addpath(genpath(fullfile(pwd, 'ardu_ws', 'src', 'ardupilot', 'Tools', 'ros2', 'matlab_msg_gen')));
+repoRoot = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+addpath(genpath(fullfile(repoRoot, 'matlab')));
+addpath(genpath(fullfile(repoRoot, 'ardu_ws', 'src', 'ardupilot', 'Tools', 'ros2', 'matlab_msg_gen')));
 
 fprintf('╔════════════════════════════════╗\n');
 fprintf('║  DataCollectionModule Test     ║\n');

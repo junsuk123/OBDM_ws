@@ -1,0 +1,16 @@
+ros:
+  domain_id: 0
+  localhost_only: 0
+  rmw_implementation: rmw_fastrtps_cpp
+gazebo:
+  version: harmonic
+  world_name: runway
+  wind_topic: /world/runway/wind
+vehicle:
+  model: iris
+  namespace: /iris
+  odometry_topic: /iris/odometry
+rviz:
+  config: simulator/rviz/ruiz.rviz
+results:
+  root: results

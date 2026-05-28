@@ -1,6 +1,7 @@
 %% Integrated Main - Simple Orchestration
 % 각 기능 모듈을 조정하는 최상위 오케스트레이션 스크립트
-%  
+%
+% ✅ 업데이트 (2026-05-11):
 %   - 공식 ArduPilot Gazebo 패키지 사용 (iris_runway.launch.py)
 %   - 포트 정리 및 환경 변수 자동 설정 (ROS_DOMAIN_ID, GZ_VERSION)
 %   - /iris 네임스페이스 자동 감지 및 모든 센서 토픽 지원
@@ -28,7 +29,13 @@
 %     addpath(genpath(pwd))
 %     integrated_main
 
-clear; clc;
+close all force;
+try
+    bdclose('all');
+catch
+end
+clearvars;
+clc;
 
 fprintf('\n╔════════════════════════════════════╗\n');
 fprintf('║  Integrated Flight Control (v2)   ║\n');
@@ -39,6 +46,7 @@ fprintf('╚══════════════════════�
 fprintf('Setting up environment...\n');
 matlab_root = fileparts(fileparts(mfilename('fullpath')));
 addpath(genpath(matlab_root));
+sanitize_runtime_environment();
 
 % 커스텀 MATLAB 메시지 경로 추가
 try
@@ -52,7 +60,10 @@ catch
 end
 
 setenv('ROS_DOMAIN_ID', '0');
-cleanup_obj = onCleanup(@cleanup_on_exit);
+if isempty(getenv('OBDM_ENABLE_ROVER_WHEEL_BRIDGE'))
+    setenv('OBDM_ENABLE_ROVER_WHEEL_BRIDGE', '1');
+end
+cleanup_obj = onCleanup(@cleanup_on_exit); %#ok<NASGU>
 
 try
     %% 1. 시뮬레이션 초기화 및 시작
@@ -117,6 +128,7 @@ try
     target_mod = [];
     airspeed_bridge_pid = '';
     virtual_wind_pid = '';
+    wind_arrow_pid = '';
     world_name = getenv('OBDM_WORLD_NAME');
     if isempty(world_name)
         world_name = 'runway';
@@ -126,10 +138,11 @@ try
         adverse_preset = getenv('OBDM_WIND_PRESET');
     end
     if isempty(adverse_preset)
-        adverse_preset = 'calm';
+        adverse_preset = 'boundary';
     end
-    cfg = struct('namespace', ns, 'verbose', true, 'base_dir', fullfile(pwd, 'matlab', 'data'), ...
-        'worldName', world_name, 'adversePreset', adverse_preset);
+    cfg = struct('namespace', ns, 'verbose', true, 'base_dir', fullfile(matlab_root, 'data'), ...
+        'worldName', world_name, 'adversePreset', adverse_preset, ...
+        'targetModelName', 'r1_rover', 'targetMarkerZ', 0.20, 'targetModelZ', 0.05);
 
     try
         airspeed_bridge_pid = start_airspeed_bridge(ns, world_name);
@@ -144,11 +157,17 @@ try
     end
 
     try
+        wind_arrow_pid = start_wind_arrow_visualizer(ns);
+    catch ME
+        fprintf('[integrated_main] Warning: Wind arrow visualizer failed to start: %s\n', ME.message);
+    end
+
+    try
         wind_mod = WindControlModuleAdapter();
         wind_mod.init(cfg);
         wind_preset = getenv('OBDM_WIND_PRESET');
         if isempty(wind_preset)
-            wind_preset = 'safe';
+            wind_preset = adverse_preset;
         end
         wind_mod.publish_once(wind_preset);
         fprintf('[integrated_main] Gazebo wind preset published: %s\n', wind_preset);
@@ -165,12 +184,19 @@ try
         fprintf('[integrated_main] Warning: MovingLandingTargetModule failed: %s\n', ME.message);
     end
 
-    try
-        adverse_mod = AdverseEnvironmentModule();
-        adverse_mod.init(cfg);
-        adverse_mod.start();
-    catch ME
-        fprintf('[integrated_main] Warning: AdverseEnvironmentModule failed: %s\n', ME.message);
+    enable_adverse_env = strcmpi(getenv('OBDM_ENABLE_ADVERSE_ENV'), '1') ...
+        || has_wind_effect_preset(adverse_preset) ...
+        || has_wind_effect_preset(wind_preset);
+    if enable_adverse_env
+        try
+            adverse_mod = AdverseEnvironmentModule();
+            adverse_mod.init(cfg);
+            adverse_mod.start();
+        catch ME
+            fprintf('[integrated_main] Warning: AdverseEnvironmentModule failed: %s\n', ME.message);
+        end
+    else
+        fprintf('[integrated_main] AdverseEnvironmentModule disabled (set OBDM_ENABLE_ADVERSE_ENV=1 to enable periodic wind gusts)\n');
     end
 
     try
@@ -232,7 +258,9 @@ try
     % 제어 테스트는 항상 실행됨
     % OBDM_SKIP_CONTROL=1로 설정하면 건너뜀
     skip_control = getenv('OBDM_SKIP_CONTROL');
+    control_test_ran = false;
     if isempty(skip_control) || ~strcmpi(skip_control, '1')
+        control_test_ran = true;
         fprintf('═════════════════════════════════════\n');
         fprintf('3️⃣ Control Test: ArUco Search / Track / Landing\n');
         fprintf('═════════════════════════════════════\n');
@@ -240,11 +268,19 @@ try
         
         % Verify ArduPilot is responding before control test
         fprintf('[Pre-flight] Checking ArduPilot connectivity...\n');
-        [status, output] = system('timeout 2 nc -zv 127.0.0.1 5760 2>&1');
-        if status == 0 || contains(output, 'succeeded')
+        port_ok = false;
+        for attempt = 1:30
+            [status, output] = system('timeout 2 nc -zv 127.0.0.1 5760 2>&1');
+            if status == 0 || contains(output, 'succeeded')
+                port_ok = true;
+                break;
+            end
+            pause(1.0);
+        end
+        if port_ok
             fprintf('[Pre-flight] ✓ ArduPilot port 5760 is responsive\n');
         else
-            fprintf('[Pre-flight] ⚠ ArduPilot port 5760 may not be responsive - will use ROS2 services\n');
+            fprintf('[Pre-flight] ArduPilot port 5760 not ready; MAVLink helper will retry fallback endpoints\n');
         end
         
         % Check available ROS2 services
@@ -256,11 +292,11 @@ try
         if service_count >= 2
             fprintf('[Pre-flight] ✓ ROS2 services available (%d found)\n', service_count);
         else
-            fprintf('[Pre-flight] ⚠ Limited ROS2 services available\n');
+            fprintf('[Pre-flight] ROS2 control services not used in this launch mode\n');
         end
 
         if service_count == 0
-            fprintf('[Pre-flight] ⚠ No control services available in current launch mode\n');
+            fprintf('[Pre-flight] No ROS2 control services available in current launch mode\n');
             fprintf('[Pre-flight] Proceeding with MAVLink fallback control path\n');
         end
 
@@ -278,19 +314,22 @@ try
                     controller = controller.initialize();
                     success = controller.execute(...
                         'takeoff_alt_m', 5, ...
-                        'search_alt_step_m', 1.0, ...
-                        'max_search_alt_m', 12.0, ...
-                        'search_timeout_s', 45, ...
-                        'min_marker_samples', 5, ...
-                        'tracking_timeout_s', 60, ...
-                        'tracking_interval_s', 1.0, ...
-                        'descent_step_m', 0.45, ...
-                        'landing_alt_m', 0.8, ...
+                        'search_step_m', 2, ...
+                        'search_timeout_s', 180, ...
+                        'search_forward_step_m', 4, ...
+                        'search_max_forward_m', 16, ...
+                        'search_lateral_step_m', 3, ...
+                        'min_marker_samples', 2, ...
+                        'approach_points', 6, ...
+                        'tracking_timeout_s', 120, ...
                         'landing_timeout_s', 45);
                     flight_log = controller.get_flight_log();
                     if success
                         fprintf('\n✓ ArUco landing mission completed successfully\n');
                         if ~isempty(flight_log) && isfield(flight_log, 'time_s') && ~isempty(flight_log.time_s)
+                            if exist('data_logger', 'var') && ~isempty(data_logger)
+                                data_logger.stop_background();
+                            end
                             plot_aruco_landing_trajectory(flight_log, ns);
                         end
                     else
@@ -350,12 +389,16 @@ try
     end
     
     %% 4. 완료
-    % Ensure vehicle is landed at the end of the test (best-effort)
-    try
-        fprintf('\n[integrated_main] Attempting final landing (best-effort)\n');
-        perform_landing(ns);
-    catch ME
-        fprintf('[integrated_main] Landing helper failed: %s\n', ME.message);
+    % Ensure vehicle is landed at the end of the control test only.
+    if exist('control_test_ran', 'var') && control_test_ran
+        try
+            fprintf('\n[integrated_main] Attempting final landing (best-effort)\n');
+            perform_landing(ns);
+        catch ME
+            fprintf('[integrated_main] Landing helper failed: %s\n', ME.message);
+        end
+    else
+        fprintf('\n[integrated_main] Final landing skipped because control test was skipped\n');
     end
 
     % Clean up visualizer and data logger
@@ -401,6 +444,7 @@ try
     else
         stop_background_pid(airspeed_bridge_pid, 'Airspeed relay');
         stop_background_pid(virtual_wind_pid, 'Virtual wind sensor');
+        stop_background_pid(wind_arrow_pid, 'Wind arrow visualizer');
     end
 
     fprintf('\n═════════════════════════════════════\n');
@@ -449,6 +493,9 @@ catch ME
         if exist('virtual_wind_pid', 'var') && ~strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
             stop_background_pid(virtual_wind_pid, 'Virtual wind sensor');
         end
+        if exist('wind_arrow_pid', 'var') && ~strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
+            stop_background_pid(wind_arrow_pid, 'Wind arrow visualizer');
+        end
     catch
     end
 end
@@ -456,7 +503,7 @@ end
 function pid = start_airspeed_bridge(ns, world_name)
     pid = '';
     repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
-    script_path = fullfile(repo_root, 'scripts', 'gz_airspeed_to_ros2.py');
+    script_path = fullfile(repo_root, 'bridges', 'ros_gz', 'gz_airspeed_to_ros2.py');
     ardu_ws = SimulationConfig.get_ardu_ws_path();
     robot_name = regexprep(ns, '^/', '');
     if isempty(robot_name)
@@ -481,7 +528,7 @@ end
 function pid = start_virtual_wind_sensor(ns, world_name)
     pid = '';
     repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
-    script_path = fullfile(repo_root, 'scripts', 'gz_virtual_wind_sensor_to_ros2.py');
+    script_path = fullfile(repo_root, 'bridges', 'ros_gz', 'gz_virtual_wind_sensor_to_ros2.py');
     ardu_ws = SimulationConfig.get_ardu_ws_path();
     robot_name = regexprep(ns, '^/', '');
     if isempty(robot_name)
@@ -500,6 +547,27 @@ function pid = start_virtual_wind_sensor(ns, world_name)
         fprintf('[integrated_main] Virtual wind sensor started (PID: %s, log: %s)\n', pid, log_file);
     else
         fprintf('[integrated_main] Virtual wind sensor start command failed: %s\n', strtrim(output));
+    end
+end
+
+function pid = start_wind_arrow_visualizer(ns)
+    pid = '';
+    repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
+    script_path = fullfile(repo_root, 'simulator', 'visualization', 'wind_arrow_marker_node.py');
+    ardu_ws = SimulationConfig.get_ardu_ws_path();
+
+    log_file = '/tmp/obdm_wind_arrow_visualizer.log';
+    cmd = sprintf(['bash -lc ''source /opt/ros/humble/setup.bash; ' ...
+        'if [ -f "%s/install/setup.bash" ]; then source "%s/install/setup.bash"; fi; ' ...
+        'export ROS_DOMAIN_ID=0; export GZ_VERSION=harmonic; ' ...
+        'setsid python3 "%s" --namespace "%s" --rate 10 > "%s" 2>&1 < /dev/null & echo $!'''], ...
+        ardu_ws, ardu_ws, script_path, ns, log_file);
+    [status, output] = system(cmd);
+    if status == 0
+        pid = strtrim(output);
+        fprintf('[integrated_main] Wind arrow visualizer started (PID: %s, log: %s)\n', pid, log_file);
+    else
+        fprintf('[integrated_main] Wind arrow visualizer start command failed: %s\n', strtrim(output));
     end
 end
 
@@ -546,6 +614,17 @@ function cleanup_on_exit()
     fprintf('\n╔════════════════════════════════════╗\n');
     fprintf('║ Cleanup: Stopping Simulation       ║\n');
     fprintf('╚════════════════════════════════════╝\n\n');
+
+    % Stop any orphan MATLAB timers first so callbacks don't keep running
+    % after user interruption.
+    try
+        t = timerfindall;
+        if ~isempty(t)
+            stop(t);
+            delete(t);
+        end
+    catch
+    end
     
     try
         pm = ProcessManager('verbose', true);
@@ -554,8 +633,24 @@ function cleanup_on_exit()
     catch ME
         fprintf('Cleanup error: %s\n', ME.message);
     end
+
+    try
+        close all force;
+        bdclose('all');
+    catch
+    end
     
     fprintf('✓ Cleanup complete\n\n');
+end
+
+function tf = has_wind_effect_preset(preset)
+    tf = false;
+    if nargin < 1 || isempty(preset)
+        return;
+    end
+
+    preset = lower(string(preset));
+    tf = ~any(preset == ["", "none", "calm"]);
 end
 
 function plot_control_trajectory(flight_log, waypoints_local, ns)
@@ -668,31 +763,69 @@ function plot_aruco_landing_trajectory(flight_log, ns)
         ns = '/iris';
     end
     try
+        n_traj = min([numel(flight_log.x), numel(flight_log.y), numel(flight_log.z)]);
+        if n_traj < 1
+            return;
+        end
+        x = flight_log.x(1:n_traj);
+        y = flight_log.y(1:n_traj);
+        z = flight_log.z(1:n_traj);
+
         figure('Name', sprintf('OBDM ArUco Landing (%s)', ns), 'NumberTitle', 'off', 'Color', 'w');
         hold on; grid on; axis equal; view(3);
-        plot3(flight_log.x, flight_log.y, flight_log.z, 'b.-', 'LineWidth', 1.2, 'MarkerSize', 12);
-        plot3(flight_log.target_x, flight_log.target_y, flight_log.target_z, 'm--o', 'LineWidth', 1.0, 'MarkerSize', 4);
-        valid_marker = isfinite(flight_log.marker_x);
+        plot3(x, y, z, '-', 'Color', [0.10 0.33 0.85], 'LineWidth', 1.4);
+        scatter3(x(end), y(end), z(end), 40, [0.10 0.33 0.85], 'filled');
+
+        n_target = min([numel(flight_log.target_x), numel(flight_log.target_y), numel(flight_log.target_z)]);
+        if n_target > 0
+            target_x = flight_log.target_x(1:n_target);
+            target_y = flight_log.target_y(1:n_target);
+            target_z = flight_log.target_z(1:n_target);
+            target_step = max(1, floor(n_target / 150));
+            target_idx = 1:target_step:n_target;
+            plot3(target_x, target_y, target_z, '--', 'Color', [0.85 0.25 0.55], 'LineWidth', 1.0);
+            scatter3(target_x(target_idx), target_y(target_idx), target_z(target_idx), ...
+                14, [0.85 0.25 0.55], 'filled');
+        end
+
+        n_marker = min([numel(flight_log.marker_x), numel(flight_log.marker_y), numel(flight_log.marker_z), ...
+            numel(flight_log.marker_vx), numel(flight_log.marker_vy), numel(flight_log.marker_vz)]);
+        if n_marker > 0
+            marker_x = flight_log.marker_x(1:n_marker);
+            marker_y = flight_log.marker_y(1:n_marker);
+            marker_z = flight_log.marker_z(1:n_marker);
+            marker_vx = flight_log.marker_vx(1:n_marker);
+            marker_vy = flight_log.marker_vy(1:n_marker);
+            marker_vz = flight_log.marker_vz(1:n_marker);
+        else
+            marker_x = [];
+            marker_y = [];
+            marker_z = [];
+            marker_vx = [];
+            marker_vy = [];
+            marker_vz = [];
+        end
+        valid_marker = isfinite(marker_x) & isfinite(marker_y) & isfinite(marker_z);
         if any(valid_marker)
-            scatter3(flight_log.marker_x(valid_marker), flight_log.marker_y(valid_marker), flight_log.marker_z(valid_marker), 36, 'r', 'filled');
-            quiver3(flight_log.marker_x(valid_marker), flight_log.marker_y(valid_marker), flight_log.marker_z(valid_marker), ...
-                flight_log.marker_vx(valid_marker), flight_log.marker_vy(valid_marker), flight_log.marker_vz(valid_marker), ...
+            scatter3(marker_x(valid_marker), marker_y(valid_marker), marker_z(valid_marker), ...
+                28, 'r', 'filled');
+            quiver3(marker_x(valid_marker), marker_y(valid_marker), marker_z(valid_marker), ...
+                marker_vx(valid_marker), marker_vy(valid_marker), marker_vz(valid_marker), ...
                 0.8, 'Color', [0.65 0.1 0.1], 'LineWidth', 1.0);
         end
         xlabel('World X / east-like (m)');
         ylabel('World Y / north-forward (m)');
         zlabel('Z / altitude (m)');
         title(sprintf('Moving ArUco Landing Target Tracking: %s', ns), 'Interpreter', 'none');
-        legend({'Drone trajectory', 'Commanded waypoints', 'Marker position', 'Marker velocity'}, 'Location', 'best');
+        legend({'Drone trajectory', 'Drone final point', 'Commanded waypoints', 'Marker position', 'Marker velocity'}, 'Location', 'best');
         hold off;
     catch ME
         fprintf('[plot_aruco_landing_trajectory] skipped: %s\n', ME.message);
     end
 end
 
-function perform_landing(ns)
+function perform_landing(~)
     % Best-effort landing helper using pymavlink. Attempts to set mode LAND and disarm.
-    if nargin < 1 || isempty(ns), ns = '/iris'; end
     try
         py_file = [tempname, '.py'];
         fid = fopen(py_file, 'w');
@@ -775,4 +908,23 @@ function delete_temp_file(file_path)
         end
     catch
     end
+end
+
+function sanitize_runtime_environment()
+    % Snap-packaged IDEs export paths that break ROS 2 GUI/subscriber
+    % processes by making them load /snap/core* system libraries.
+    snap_vars = { ...
+        'SNAP', 'SNAP_ARCH', 'SNAP_COMMON', 'SNAP_CONTEXT', 'SNAP_COOKIE', ...
+        'SNAP_DATA', 'SNAP_EUID', 'SNAP_INSTANCE_NAME', 'SNAP_LAUNCHER_ARCH_TRIPLET', ...
+        'SNAP_LIBRARY_PATH', 'SNAP_NAME', 'SNAP_REAL_HOME', 'SNAP_REVISION', ...
+        'SNAP_UID', 'SNAP_USER_COMMON', 'SNAP_USER_DATA', 'SNAP_VERSION', ...
+        'GTK_EXE_PREFIX', 'GTK_IM_MODULE_FILE', 'GTK_PATH', 'GTK_MODULES', ...
+        'LOCPATH', 'QT_IM_MODULE', 'XDG_DATA_HOME'};
+    for idx = 1:numel(snap_vars)
+        setenv(snap_vars{idx}, '');
+    end
+    setenv('XDG_DATA_DIRS', '/usr/local/share:/usr/share');
+    setenv('XDG_CONFIG_DIRS', '/etc/xdg');
+    setenv('QT_ACCESSIBILITY', '0');
+    setenv('NO_AT_BRIDGE', '1');
 end

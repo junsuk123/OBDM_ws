@@ -1,0 +1,9 @@
+name: wind_disturbance
+description: Wind-disturbance scenario. Currently implemented through the ontology_landing integrated entrypoint.
+entrypoint: user_stack/decision/ontology_landing/matlab/main.m
+user_stack: ontology_landing
+world: runway
+wind:
+  gazebo_topic: /world/runway/wind
+  rviz_marker_topic: /iris/wind_arrow
+  sensor_topic: /iris/wind_sensor

@@ -1,39 +1,73 @@
 # Runbook
 
-## Build
+## Environment
 
 ```bash
-cd /home/j/SynologyDrive/INCSL/devel/INCSL/OBDM_ws/ardu_ws
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install
+cd /home/j/SynologyDrive/junsuk/devel/INCSL/OBDM_ws
+source ./setup_env.sh
 ```
 
-## Launch From MATLAB
+`setup_env.sh` sources ROS 2 Humble and `ardu_ws/install/setup.bash` when available, and exports:
+
+- `OBDM_WS`
+- `OBDM_ARDU_WS`
+- `ROS_DOMAIN_ID=0`
+- `ROS_LOCALHOST_ONLY=0`
+- `RMW_IMPLEMENTATION=rmw_fastrtps_cpp`
+- `GZ_VERSION=harmonic`
+
+## Integrated Ontology Landing Run
 
 ```bash
-cd /home/j/SynologyDrive/INCSL/devel/INCSL/OBDM_ws
-matlab -batch "run('matlab/main/integrated_main.m')"
+./run_sim.sh --scenario ontology_landing --user_stack ontology_landing
 ```
 
-## Manual Wind Checks
+Equivalent MATLAB command:
 
 ```bash
-gz topic -l | grep wind
-gz topic -e -t /world/runway/wind
-GZ_VERSION=harmonic gz topic -t "/world/runway/wind" -m gz.msgs.Wind -p "linear_velocity: {x: 3.0, y: 0.0, z: 0.0} enable_wind: true"
+matlab -batch "run('user_stack/decision/ontology_landing/matlab/main.m')"
 ```
 
-## ROS 2 Checks
+## Manual Simulator Launch
+
+The current integrated run uses `SimulationManager.m`, which launches:
 
 ```bash
-source /opt/ros/humble/setup.bash
-source ardu_ws/install/setup.bash
-ros2 topic list | grep -E 'iris|landing_marker|wind'
+ros2 launch ardupilot_gz_bringup iris_runway.launch.py \
+  use_gz_sim_gui:=true rviz:=false use_gz_tf:=true \
+  rviz_config:=simulator/rviz/ruiz.rviz
+```
+
+RViz is started later by `MovingLandingTargetModule.m` after camera, wind, and marker topics are available.
+
+## Diagnostics
+
+```bash
+source ./setup_env.sh
+ros2 topic list | grep -E 'iris|landing_marker|wind|obdm'
 ros2 topic echo /landing_marker/odom --once
+ros2 topic echo /landing_marker/touchdown --once --qos-durability transient_local
 ros2 topic echo /iris/wind_sensor --once
-ros2 topic echo /iris/air_speed --once
+ros2 topic echo /iris/wind_arrow --once
+gz topic -l | grep wind
+gz service -s /world/runway/wind_info --reqtype gz.msgs.Empty --reptype gz.msgs.Wind --timeout 2000 --req ''
 ```
 
-## Runtime Artifacts
+## Cleanup
 
-SITL and Gazebo produce `*.tlog`, `eeprom.bin`, `terrain/`, `logs/`, `build/`, `install/`, and `log/` outputs. These are ignored by git and can be deleted when cleaning the workspace.
+The integrated run stops helper nodes and simulator processes on touchdown. For manual cleanup:
+
+```bash
+pkill -TERM -f 'gz sim|ros_gz_bridge|parameter_bridge|micro_ros_agent|arducopter|arduplane|mavproxy|rviz2' || true
+pkill -TERM -f 'aruco_landing_target_node.py|aruco_camera_detector_node.py|gz_virtual_wind_sensor_to_ros2.py|wind_arrow_marker_node.py|mavlink_guidance_streamer.py|realtime_ontology_trajectory_generator.py|guidance_path_visualizer.py|iris_rviz_tf_publisher.py|rover_cmd_vel_to_wheels.py' || true
+```
+
+## Results
+
+Ontology landing results are currently written to:
+
+```text
+user_stack/decision/ontology_landing/matlab/results/<timestamp>/
+```
+
+Expected files include `summary.txt`, `metrics.csv`, `landing_framework_results.mat`, `altitude_attitude.png`, `decision_timeline.png`, `semantic_features.png`, `wind_profile.png`, `wind_bin_analysis.png`, and `confusion_matrix.png`.

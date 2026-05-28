@@ -7,7 +7,7 @@
 %    - 클래스명 (classdef MyModule)
 %    - 파일명 (MODULE_TEMPLATE -> YourModuleName)
 %    - 주석과 구현
-% 3. matlab/verification/test_your_module_name.m 생성
+% 3. matlab/tests/test_your_module_name.m 생성
 % 4. 독립 테스트로 검증
 % 5. integrated_main.m에서 호출
 
