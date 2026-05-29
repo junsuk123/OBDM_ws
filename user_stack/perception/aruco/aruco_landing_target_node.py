@@ -152,12 +152,17 @@ class MovingLandingTarget:
         altitude_ok = self.drone["z"] <= self.args.touchdown_z_threshold
         position_ok = horizontal_error <= self.args.touchdown_xy_tolerance
         speed_ok = abs(self.drone["vz"]) <= self.args.touchdown_max_abs_vz
-        if altitude_ok and position_ok and speed_ok:
+        ground_contact_ok = (
+            self.drone["z"] <= self.args.touchdown_ground_z_threshold
+            and horizontal_error <= self.args.touchdown_ground_xy_tolerance
+        )
+        if ground_contact_ok or (altitude_ok and position_ok and speed_ok):
             self.touchdown_detected = True
             self.touchdown_metrics = (self.drone["z"], horizontal_error, self.drone["vz"])
             self.node.get_logger().info(
                 f"Touchdown on marker detected: z={self.drone['z']:.2f}, "
-                f"xy_error={horizontal_error:.2f}, vz={self.drone['vz']:.2f}; stopping target motion"
+                f"xy_error={horizontal_error:.2f}, vz={self.drone['vz']:.2f}, "
+                f"ground_contact={ground_contact_ok}; stopping target motion"
             )
             self.stop_motion()
 
@@ -615,17 +620,27 @@ def main():
     parser.add_argument(
         "--touchdown-z-threshold",
         type=float,
-        default=float(os.getenv("OBDM_TOUCHDOWN_Z_THRESHOLD", "0.35")),
+        default=float(os.getenv("OBDM_TOUCHDOWN_Z_THRESHOLD", "0.60")),
     )
     parser.add_argument(
         "--touchdown-xy-tolerance",
         type=float,
-        default=float(os.getenv("OBDM_TOUCHDOWN_XY_TOLERANCE", "0.75")),
+        default=float(os.getenv("OBDM_TOUCHDOWN_XY_TOLERANCE", "1.15")),
     )
     parser.add_argument(
         "--touchdown-max-abs-vz",
         type=float,
-        default=float(os.getenv("OBDM_TOUCHDOWN_MAX_ABS_VZ", "1.0")),
+        default=float(os.getenv("OBDM_TOUCHDOWN_MAX_ABS_VZ", "2.50")),
+    )
+    parser.add_argument(
+        "--touchdown-ground-z-threshold",
+        type=float,
+        default=float(os.getenv("OBDM_TOUCHDOWN_GROUND_Z_THRESHOLD", "0.85")),
+    )
+    parser.add_argument(
+        "--touchdown-ground-xy-tolerance",
+        type=float,
+        default=float(os.getenv("OBDM_TOUCHDOWN_GROUND_XY_TOLERANCE", "1.35")),
     )
     parser.add_argument("--drone-odom-topic", default=None)
     parser.add_argument("--marker-odom-topic", default="/landing_marker/odom")

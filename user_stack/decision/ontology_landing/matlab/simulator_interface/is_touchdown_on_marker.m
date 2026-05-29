@@ -6,21 +6,18 @@ if isTouchdown
     return;
 end
 
-touchdownAltitude = cfg.labeling.safeAltitude;
-if isfield(cfg.labeling, 'touchdownAltitude')
-    touchdownAltitude = cfg.labeling.touchdownAltitude;
-end
-
-touchdownPositionError = cfg.labeling.safePositionError;
-if isfield(cfg.labeling, 'touchdownPositionError')
-    touchdownPositionError = cfg.labeling.touchdownPositionError;
-end
+touchdownAltitude = get_labeling_value(cfg, 'touchdownAltitude', cfg.labeling.safeAltitude);
+touchdownPositionError = get_labeling_value(cfg, 'touchdownPositionError', cfg.labeling.safePositionError);
+groundAltitude = get_labeling_value(cfg, 'touchdownGroundAltitude', touchdownAltitude);
+groundPositionError = get_labeling_value(cfg, 'touchdownGroundPositionError', touchdownPositionError);
+maxAbsVz = get_labeling_value(cfg, 'touchdownMaxAbsVz', cfg.labeling.safeVerticalSpeed);
 
 altitudeOk = uavState.altitude <= touchdownAltitude;
 positionOk = observation.positionError <= touchdownPositionError;
-verticalOk = abs(observation.verticalSpeed) <= max(cfg.labeling.safeVerticalSpeed, 0.05);
+verticalOk = abs(observation.verticalSpeed) <= max(maxAbsVz, 0.05);
+groundContactOk = uavState.altitude <= groundAltitude && observation.positionError <= groundPositionError;
 
-isTouchdown = altitudeOk && positionOk && verticalOk;
+isTouchdown = groundContactOk || (altitudeOk && positionOk && verticalOk);
 end
 
 function isTouchdown = read_touchdown_topic()
@@ -52,5 +49,12 @@ for idx = 1:12
         break;
     end
     repoRoot = parentDir;
+end
+end
+
+function value = get_labeling_value(cfg, fieldName, defaultValue)
+value = defaultValue;
+if isfield(cfg, 'labeling') && isfield(cfg.labeling, fieldName) && ~isempty(cfg.labeling.(fieldName))
+    value = cfg.labeling.(fieldName);
 end
 end

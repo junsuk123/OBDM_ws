@@ -157,15 +157,18 @@ cfg.guidance.padEkfProcessNoiseVelocity = 0.12;
 cfg.guidance.padEkfMeasurementNoise = 0.18;
 
 cfg.labeling = struct();
-cfg.labeling.safeAltitude = 0.35;
-cfg.labeling.safeVerticalSpeed = 0.75;
+cfg.labeling.safeAltitude = 0.55;
+cfg.labeling.safeVerticalSpeed = 1.50;
 cfg.labeling.safeAttitudeDeg = 10.0;
-cfg.labeling.safePositionError = 0.75;
+cfg.labeling.safePositionError = 1.15;
 cfg.labeling.safeTagStability = 0.65;
 cfg.labeling.requireTagDetection = true;
 cfg.labeling.safeScoreThreshold = 0.75;
-cfg.labeling.touchdownAltitude = 0.35;
-cfg.labeling.touchdownPositionError = 0.75;
+cfg.labeling.touchdownAltitude = 0.60;
+cfg.labeling.touchdownPositionError = 1.15;
+cfg.labeling.touchdownGroundAltitude = 0.85;
+cfg.labeling.touchdownGroundPositionError = 1.35;
+cfg.labeling.touchdownMaxAbsVz = 2.50;
 
 cfg.evaluation = struct();
 cfg.evaluation.windBins = [0, 2, 4, 6, 8, 10, 12, inf];

@@ -40,7 +40,7 @@ moduleCfg.takeoffZThreshold = cfg.simulator.takeoffDetectionAltitude;
 moduleCfg.guidanceTakeoffAltitude = cfg.simulator.takeoffAltitude;
 moduleCfg.touchdownZThreshold = cfg.labeling.touchdownAltitude;
 moduleCfg.touchdownXYTolerance = cfg.labeling.touchdownPositionError;
-moduleCfg.touchdownMaxAbsVz = max(cfg.labeling.safeVerticalSpeed, 1.0);
+moduleCfg.touchdownMaxAbsVz = max(get_labeling_value(cfg, 'touchdownMaxAbsVz', cfg.labeling.safeVerticalSpeed), 1.0);
 
 try
     sim.padModule = MovingLandingTargetModule();
@@ -51,4 +51,13 @@ try
 catch ME
     fprintf('[simulator_interface] startLandingPadMotion failed: %s\n', ME.message);
     sim.padModule = [];
+end
+
+end
+
+function value = get_labeling_value(cfg, fieldName, defaultValue)
+value = defaultValue;
+if isfield(cfg, 'labeling') && isfield(cfg.labeling, fieldName) && ~isempty(cfg.labeling.(fieldName))
+    value = cfg.labeling.(fieldName);
+end
 end
