@@ -17,6 +17,12 @@ if ~isfield(cfg.simulation, 'autoLaunch') || ~cfg.simulation.autoLaunch
     return;
 end
 
+if isfield(sim, 'landingStackReady') && ~sim.landingStackReady
+    fprintf('[simulator_interface] takeoff blocked: landing stack is not ready\n');
+    append_startup_log('takeoff_blocked_stack_not_ready', sprintf('namespace=%s', ns));
+    return;
+end
+
 if (isfield(sim, 'backend') && strcmpi(strtrim(sim.backend), 'mock')) || ...
         (isfield(sim, 'isConnected') && ~sim.isConnected)
     fprintf('[simulator_interface] performTakeoff skipped: placeholder simulator backend is active\n');
@@ -25,14 +31,18 @@ end
 
 if ~wait_for_takeoff_state_stream(ns)
     fprintf('[simulator_interface] takeoff skipped: %s odometry stream is not ready\n', ns);
+    append_startup_log('takeoff_skipped_odom_not_ready', sprintf('namespace=%s', ns));
     return;
 end
 
+append_startup_log('takeoff_request_begin', sprintf('namespace=%s altitude=%.2f', ns, sim.takeoff.requestedAltitude));
 if run_mavlink_command('arm_takeoff', sim.takeoff.requestedAltitude, 0, 0, 45, sim, cfg)
     pause(max(0.5, sim.takeoff.hoverDuration));
     sim.takeoff.completed = true;
+    append_startup_log('takeoff_hover_complete', sprintf('namespace=%s hover_s=%.2f', ns, sim.takeoff.hoverDuration));
     fprintf('[simulator_interface] takeoff command accepted for %s (altitude %.2f m)\n', ns, sim.takeoff.requestedAltitude);
 else
+    append_startup_log('takeoff_request_failed', sprintf('namespace=%s altitude=%.2f', ns, sim.takeoff.requestedAltitude));
     fprintf('[simulator_interface] takeoff command failed for %s\n', ns);
 end
 end
@@ -62,10 +72,23 @@ for attempt = 1:12
 end
 end
 
+function append_startup_log(eventName, message)
+try
+    fid = fopen('/tmp/obdm_startup_sequence.log', 'a');
+    if fid < 0
+        return;
+    end
+    cleanupObj = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    fprintf(fid, '%s event=%s message=%s\n', datestr(now, 'yyyy-mm-ddTHH:MM:SS.FFF'), eventName, message);
+catch
+end
+end
+
 function prefix = clean_env_command_prefix()
 keys = {'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'DISPLAY', ...
     'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', ...
-    'RMW_IMPLEMENTATION', 'ROS_LOCALHOST_ONLY'};
+    'RMW_IMPLEMENTATION', 'ROS_LOCALHOST_ONLY', 'CYCLONEDDS_URI', ...
+    'FASTRTPS_DEFAULT_PROFILES_FILE'};
 defaults = struct('SHELL', '/bin/bash', 'LANG', 'C.UTF-8');
 parts = {'env -i'};
 for i = 1:numel(keys)

@@ -1,6 +1,15 @@
 function sim = stopLandingPadMotion(sim)
 %STOPLANDINGPADMOTION Stop landing target helpers and command rover halt.
 
+if nargin < 1 || isempty(sim)
+    sim = struct();
+    return;
+end
+
+if isfield(sim, 'runtimeShutdown') && sim.runtimeShutdown
+    return;
+end
+
 if isfield(sim, 'padMotion')
     sim.padMotion.enabled = false;
 end
@@ -20,7 +29,7 @@ else
 end
 
 function stop_rover_motion_local()
-cmd = ['bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
+cmd = ['timeout 3 bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
     'export ROS_DOMAIN_ID=0; export GZ_VERSION=harmonic; ' ...
     'ros2 topic pub --once /model/r1_rover/cmd_vel geometry_msgs/msg/Twist ' ...
     '"{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}" >/dev/null 2>&1 || true; ' ...

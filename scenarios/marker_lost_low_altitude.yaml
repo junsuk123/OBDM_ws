@@ -1,0 +1,14 @@
+scenario: marker_lost_low_altitude
+description: Marker lost at low altitude, requiring ascend-and-research behavior.
+platform:
+  moving: true
+  speed_mps: 0.2
+wind_profile: none
+marker:
+  temporary_loss: true
+  loss_start_s: 35.0
+  loss_duration_s: 8.0
+  trigger_altitude_m: 1.5
+obstacles: []
+expected_decision_modes:
+  - ASCEND_AND_RESEARCH

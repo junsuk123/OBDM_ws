@@ -204,15 +204,9 @@ class ArucoCameraDetector:
             self.log_diagnostics()
             return
 
-        preferred = [
-            idx for idx in matches
-            if int(ids_flat[int(idx)]) == int(self.args.marker_id)
-        ]
-        candidates = preferred if preferred else matches
-        selected = max(candidates, key=lambda idx: abs(cv2.contourArea(corners[int(idx)][0].astype(np.float32))))
+        selected = max(matches, key=lambda idx: abs(cv2.contourArea(corners[int(idx)][0].astype(np.float32))))
         marker_corners = corners[int(selected)][0].astype(np.float64)
         marker_id = int(ids_flat[int(selected)])
-        marker_size_m = self.marker_sizes[marker_id]
         self.publish_annotated_image(frame, marker_corners, marker_id, msg)
         self.publish_bbox(marker_corners, marker_id, msg.header.stamp, msg.header.frame_id, msg.width, msg.height)
         self.publish_servo_error(marker_corners, msg.header.stamp, msg.header.frame_id, msg.width, msg.height)
@@ -221,20 +215,9 @@ class ArucoCameraDetector:
             self.log_diagnostics()
             return
 
-        pose = self.estimate_marker_pose(marker_corners, marker_size_m)
-        if pose is None:
+        pos = self.estimate_pad_center_from_markers(corners, ids_flat, matches)
+        if pos is None:
             return
-        tvec, rvec = pose
-        center_offset = self.marker_center_offsets.get(marker_id)
-        if center_offset is None:
-            self.node.get_logger().warn(
-                f"detected marker {marker_id} has no center offset; cannot infer center marker",
-                throttle_duration_sec=2.0,
-            )
-            return
-        rotation, _ = cv2.Rodrigues(rvec.reshape(3, 1))
-        center_tvec = tvec + rotation.dot(center_offset)
-        pos = self.camera_to_world(center_tvec)
         self.detection_count += 1
         self.publish_marker(pos, msg.header.stamp)
 
@@ -313,6 +296,40 @@ class ArucoCameraDetector:
         if not ok:
             return None
         return tvec.reshape(3).astype(float), rvec.reshape(3).astype(float)
+
+    def estimate_pad_center_from_markers(self, corners, ids_flat, matches):
+        center_candidates = []
+        weights = []
+        for idx in matches:
+            marker_id = int(ids_flat[int(idx)])
+            center_offset = self.marker_center_offsets.get(marker_id)
+            if center_offset is None:
+                self.node.get_logger().warn(
+                    f"detected marker {marker_id} has no center offset; skipping it for pad-center fusion",
+                    throttle_duration_sec=2.0,
+                )
+                continue
+            marker_corners = corners[int(idx)][0].astype(np.float64)
+            marker_size_m = self.marker_sizes[marker_id]
+            pose = self.estimate_marker_pose(marker_corners, marker_size_m)
+            if pose is None:
+                continue
+            tvec, rvec = pose
+            rotation, _ = cv2.Rodrigues(rvec.reshape(3, 1))
+            center_tvec = tvec + rotation.dot(center_offset)
+            center_candidates.append(self.camera_to_world(center_tvec))
+            area_px = abs(cv2.contourArea(marker_corners.astype(np.float32)))
+            weights.append(max(1.0, area_px))
+
+        if not center_candidates:
+            return None
+
+        centers = np.vstack(center_candidates)
+        weights = np.array(weights, dtype=np.float64)
+        pos = np.average(centers, axis=0, weights=weights)
+        if self.args.clamp_ground_z:
+            pos[2] = self.args.marker_ground_z
+        return pos
 
     def publish_bbox(self, marker_corners, marker_id, stamp, frame_id, image_width, image_height):
         frame_id = frame_id or self.camera_frame_id or "camera"

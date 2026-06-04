@@ -1,0 +1,30 @@
+modes:
+  DIRECT_DESCENT:
+    horizontal_gain: 0.60
+    vertical_rate_mps: 0.25
+    lookahead_s: 0.8
+  TRACKING_APPROACH:
+    horizontal_gain: 1.20
+    vertical_rate_mps: 0.18
+    lookahead_s: 1.5
+  CONSERVATIVE_APPROACH:
+    horizontal_gain: 1.00
+    vertical_rate_mps: 0.10
+    lateral_offset_m: 2.5
+    lookahead_s: 1.8
+  MINIMUM_TIME_APPROACH:
+    horizontal_gain: 1.50
+    vertical_rate_mps: 0.45
+    lookahead_s: 2.0
+  HOVER_AND_ALIGN:
+    horizontal_gain: 0.35
+    vertical_rate_mps: 0.0
+  ASCEND_AND_RESEARCH:
+    climb_rate_mps: 0.5
+    search_altitude_m: 4.0
+  ABORT_LANDING:
+    climb_rate_mps: 0.8
+    abort_altitude_m: 8.0
+  EMERGENCY_LAND:
+    horizontal_gain: 0.80
+    vertical_rate_mps: 0.35

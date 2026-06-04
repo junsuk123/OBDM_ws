@@ -1,0 +1,11 @@
+scenario: high_wind_reject_direct
+description: High wind condition where direct descent must be rejected.
+platform:
+  moving: true
+  speed_mps: 0.2
+wind_profile: high_wind_reject_direct
+marker:
+  temporary_loss: false
+obstacles: []
+expected_decision_modes:
+  - CONSERVATIVE_APPROACH

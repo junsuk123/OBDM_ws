@@ -1,0 +1,14 @@
+scenario: moving_platform_marker_loss
+description: Moving platform with temporary marker loss.
+platform:
+  moving: true
+  speed_mps: 0.4
+wind_profile: none
+marker:
+  temporary_loss: true
+  loss_start_s: 20.0
+  loss_duration_s: 4.0
+obstacles: []
+expected_decision_modes:
+  - HOVER_AND_ALIGN
+  - ASCEND_AND_RESEARCH

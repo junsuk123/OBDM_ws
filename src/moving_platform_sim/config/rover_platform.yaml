@@ -1,0 +1,7 @@
+platform:
+  model_name: r1_rover
+  landing_pad_frame: landing_pad
+  pad_radius_m: 0.45
+  marker_ground_z_m: 0.20
+  nominal_speed_mps: 0.4
+  max_safe_speed_mps: 1.0

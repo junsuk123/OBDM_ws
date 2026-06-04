@@ -17,3 +17,17 @@ sim.truth.altitude = cfg.simulator.initialAltitude;
 sim.truth.timestamp = 0.0;
 
 sim.state = sim.truth;
+append_startup_log('scenario_reset', sprintf('scenario=%d', scenarioIndex));
+end
+
+function append_startup_log(eventName, message)
+try
+    fid = fopen('/tmp/obdm_startup_sequence.log', 'a');
+    if fid < 0
+        return;
+    end
+    cleanupObj = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    fprintf(fid, '%s event=%s message=%s\n', datestr(now, 'yyyy-mm-ddTHH:MM:SS.FFF'), eventName, message);
+catch
+end
+end

@@ -1,0 +1,579 @@
+{
+  "stamp": 1234567890.0,
+  "graph_id": "LandingOntologyTrajectoryGraph",
+  "nodes": [
+    {
+      "id": "VehicleState",
+      "label": "VehicleState",
+      "type": "evidence",
+      "attributes": {
+        "description": "UAV pose, velocity, and attitude",
+        "activation": 1.0
+      },
+      "confidence": 1.0
+    },
+    {
+      "id": "PadTrack",
+      "label": "PadTrack",
+      "type": "evidence",
+      "attributes": {
+        "description": "Estimated landing pad center and velocity",
+        "activation": 0.81
+      },
+      "confidence": 0.81
+    },
+    {
+      "id": "WindRisk",
+      "label": "WindRisk",
+      "type": "semantic",
+      "attributes": {
+        "description": "Wind and gust disturbance risk",
+        "activation": 0.23
+      },
+      "confidence": 0.23
+    },
+    {
+      "id": "DragRisk",
+      "label": "DragRisk",
+      "type": "semantic",
+      "attributes": {
+        "description": "Aerodynamic drag disturbance risk",
+        "activation": 0.18
+      },
+      "confidence": 0.18
+    },
+    {
+      "id": "VisualStability",
+      "label": "VisualStability",
+      "type": "semantic",
+      "attributes": {
+        "description": "Marker visibility and image stability",
+        "activation": 0.86
+      },
+      "confidence": 0.86
+    },
+    {
+      "id": "AlignmentState",
+      "label": "AlignmentState",
+      "type": "semantic",
+      "attributes": {
+        "description": "Horizontal/yaw alignment to pad",
+        "activation": 0.78
+      },
+      "confidence": 0.78
+    },
+    {
+      "id": "AttitudeStability",
+      "label": "AttitudeStability",
+      "type": "semantic",
+      "attributes": {
+        "description": "Roll/pitch stability",
+        "activation": 0.91
+      },
+      "confidence": 0.91
+    },
+    {
+      "id": "DescentStability",
+      "label": "DescentStability",
+      "type": "semantic",
+      "attributes": {
+        "description": "Vertical-speed stability",
+        "activation": 0.74
+      },
+      "confidence": 0.74
+    },
+    {
+      "id": "TimeEfficiency",
+      "label": "TimeEfficiency",
+      "type": "semantic",
+      "attributes": {
+        "description": "Time-to-target efficiency",
+        "activation": 0.69
+      },
+      "confidence": 0.69
+    },
+    {
+      "id": "EnergyEfficiency",
+      "label": "EnergyEfficiency",
+      "type": "semantic",
+      "attributes": {
+        "description": "Energy cost efficiency",
+        "activation": 0.82
+      },
+      "confidence": 0.82
+    },
+    {
+      "id": "OperationalRisk",
+      "label": "OperationalRisk",
+      "type": "inference",
+      "attributes": {
+        "description": "Unified landing risk",
+        "activation": 0.24
+      },
+      "inferred": true,
+      "confidence": 0.76
+    },
+    {
+      "id": "TrackQuality",
+      "label": "TrackQuality",
+      "type": "inference",
+      "attributes": {
+        "description": "Quality of visual/pad tracking",
+        "activation": 0.84
+      },
+      "inferred": true,
+      "confidence": 0.84
+    },
+    {
+      "id": "LandingIntent",
+      "label": "LandingIntent",
+      "type": "decision",
+      "attributes": {
+        "description": "Posterior-weighted intent to land",
+        "activation": 0.88
+      },
+      "inferred": true,
+      "confidence": 0.88
+    },
+    {
+      "id": "FuturePadPrediction",
+      "label": "FuturePadPrediction",
+      "type": "prediction",
+      "attributes": {
+        "description": "Multi-step future pad estimate",
+        "activation": 0.62
+      },
+      "inferred": true,
+      "confidence": 0.62
+    },
+    {
+      "id": "ApproachAimPoint",
+      "label": "ApproachAimPoint",
+      "type": "trajectory",
+      "attributes": {
+        "description": "Predicted point used for horizontal guidance",
+        "activation": 0.84
+      },
+      "inferred": true,
+      "confidence": 0.84
+    },
+    {
+      "id": "HorizontalGuidance",
+      "label": "HorizontalGuidance",
+      "type": "trajectory",
+      "attributes": {
+        "description": "Horizontal pursuit authority",
+        "activation": 0.78
+      },
+      "inferred": true,
+      "confidence": 0.78
+    },
+    {
+      "id": "DescentAuthority",
+      "label": "DescentAuthority",
+      "type": "trajectory",
+      "attributes": {
+        "description": "Permission to descend",
+        "activation": 0.45
+      },
+      "inferred": true,
+      "confidence": 0.45
+    },
+    {
+      "id": "FinalLandReadiness",
+      "label": "FinalLandReadiness",
+      "type": "terminal",
+      "attributes": {
+        "description": "Readiness for final LAND mode",
+        "activation": 0.56
+      },
+      "inferred": true,
+      "confidence": 0.56
+    }
+  ],
+  "edges": [
+    {
+      "id": "VehicleState__observes__AlignmentState",
+      "source": "VehicleState",
+      "target": "AlignmentState",
+      "label": "observes",
+      "type": "state_observation",
+      "confidence": 1.0
+    },
+    {
+      "id": "VehicleState__observes__AttitudeStability",
+      "source": "VehicleState",
+      "target": "AttitudeStability",
+      "label": "observes",
+      "type": "state_observation",
+      "confidence": 1.0
+    },
+    {
+      "id": "VehicleState__observes__DescentStability",
+      "source": "VehicleState",
+      "target": "DescentStability",
+      "label": "observes",
+      "type": "state_observation",
+      "confidence": 1.0
+    },
+    {
+      "id": "WindRisk__increases__OperationalRisk",
+      "source": "WindRisk",
+      "target": "OperationalRisk",
+      "label": "increases",
+      "type": "risk_contribution",
+      "confidence": 0.3
+    },
+    {
+      "id": "DragRisk__increases__OperationalRisk",
+      "source": "DragRisk",
+      "target": "OperationalRisk",
+      "label": "increases",
+      "type": "risk_contribution",
+      "confidence": 0.25
+    },
+    {
+      "id": "EnergyEfficiency__reduces__OperationalRisk",
+      "source": "EnergyEfficiency",
+      "target": "OperationalRisk",
+      "label": "reduces",
+      "type": "risk_mitigation",
+      "confidence": 0.2
+    },
+    {
+      "id": "AttitudeStability__reduces__OperationalRisk",
+      "source": "AttitudeStability",
+      "target": "OperationalRisk",
+      "label": "reduces",
+      "type": "risk_mitigation",
+      "confidence": 0.15
+    },
+    {
+      "id": "VisualStability__reduces__OperationalRisk",
+      "source": "VisualStability",
+      "target": "OperationalRisk",
+      "label": "reduces",
+      "type": "risk_mitigation",
+      "confidence": 0.1
+    },
+    {
+      "id": "AlignmentState__supports__TrackQuality",
+      "source": "AlignmentState",
+      "target": "TrackQuality",
+      "label": "supports",
+      "type": "track_quality_evidence",
+      "confidence": 0.45
+    },
+    {
+      "id": "VisualStability__supports__TrackQuality",
+      "source": "VisualStability",
+      "target": "TrackQuality",
+      "label": "supports",
+      "type": "track_quality_evidence",
+      "confidence": 0.35
+    },
+    {
+      "id": "AttitudeStability__supports__TrackQuality",
+      "source": "AttitudeStability",
+      "target": "TrackQuality",
+      "label": "supports",
+      "type": "track_quality_evidence",
+      "confidence": 0.2
+    },
+    {
+      "id": "TimeEfficiency__extends_prediction__ApproachAimPoint",
+      "source": "TimeEfficiency",
+      "target": "ApproachAimPoint",
+      "label": "extends_prediction",
+      "type": "prediction_context",
+      "confidence": 0.45,
+      "inferred": true
+    },
+    {
+      "id": "PadTrack__predicts__FuturePadPrediction",
+      "source": "PadTrack",
+      "target": "FuturePadPrediction",
+      "label": "predicts",
+      "type": "prediction_source",
+      "confidence": 1.0,
+      "inferred": true
+    },
+    {
+      "id": "FuturePadPrediction__selects__ApproachAimPoint",
+      "source": "FuturePadPrediction",
+      "target": "ApproachAimPoint",
+      "label": "selects",
+      "type": "prediction_selection",
+      "confidence": 0.55,
+      "inferred": true
+    },
+    {
+      "id": "TrackQuality__scales__HorizontalGuidance",
+      "source": "TrackQuality",
+      "target": "HorizontalGuidance",
+      "label": "scales",
+      "type": "guidance_gain",
+      "confidence": 0.55,
+      "inferred": true
+    },
+    {
+      "id": "LandingIntent__enables__HorizontalGuidance",
+      "source": "LandingIntent",
+      "target": "HorizontalGuidance",
+      "label": "enables",
+      "type": "guidance_gate",
+      "confidence": 0.3,
+      "inferred": true
+    },
+    {
+      "id": "OperationalRisk__limits__HorizontalGuidance",
+      "source": "OperationalRisk",
+      "target": "HorizontalGuidance",
+      "label": "limits",
+      "type": "guidance_limit",
+      "confidence": 0.45,
+      "inferred": true
+    },
+    {
+      "id": "LandingIntent__enables__DescentAuthority",
+      "source": "LandingIntent",
+      "target": "DescentAuthority",
+      "label": "enables",
+      "type": "descent_gate",
+      "confidence": 0.2,
+      "inferred": true
+    },
+    {
+      "id": "AlignmentState__requires__DescentAuthority",
+      "source": "AlignmentState",
+      "target": "DescentAuthority",
+      "label": "requires",
+      "type": "descent_requirement",
+      "confidence": 0.2,
+      "inferred": true
+    },
+    {
+      "id": "VisualStability__requires__DescentAuthority",
+      "source": "VisualStability",
+      "target": "DescentAuthority",
+      "label": "requires",
+      "type": "descent_requirement",
+      "confidence": 0.2,
+      "inferred": true
+    },
+    {
+      "id": "AttitudeStability__requires__DescentAuthority",
+      "source": "AttitudeStability",
+      "target": "DescentAuthority",
+      "label": "requires",
+      "type": "descent_requirement",
+      "confidence": 0.2,
+      "inferred": true
+    },
+    {
+      "id": "DescentStability__requires__DescentAuthority",
+      "source": "DescentStability",
+      "target": "DescentAuthority",
+      "label": "requires",
+      "type": "descent_requirement",
+      "confidence": 0.2,
+      "inferred": true
+    },
+    {
+      "id": "EnergyEfficiency__supports__DescentAuthority",
+      "source": "EnergyEfficiency",
+      "target": "DescentAuthority",
+      "label": "supports",
+      "type": "descent_support",
+      "confidence": 0.2,
+      "inferred": true
+    },
+    {
+      "id": "OperationalRisk__limits__DescentAuthority",
+      "source": "OperationalRisk",
+      "target": "DescentAuthority",
+      "label": "limits",
+      "type": "descent_limit",
+      "confidence": 0.2,
+      "inferred": true
+    },
+    {
+      "id": "DescentAuthority__supports__FinalLandReadiness",
+      "source": "DescentAuthority",
+      "target": "FinalLandReadiness",
+      "label": "supports",
+      "type": "terminal_readiness",
+      "confidence": 0.35,
+      "inferred": true
+    },
+    {
+      "id": "TrackQuality__supports__FinalLandReadiness",
+      "source": "TrackQuality",
+      "target": "FinalLandReadiness",
+      "label": "supports",
+      "type": "terminal_readiness",
+      "confidence": 0.35,
+      "inferred": true
+    },
+    {
+      "id": "OperationalRisk__limits__FinalLandReadiness",
+      "source": "OperationalRisk",
+      "target": "FinalLandReadiness",
+      "label": "limits",
+      "type": "terminal_limit",
+      "confidence": 0.3,
+      "inferred": true
+    }
+  ],
+  "topdown": {
+    "drone": {
+      "x": -1.15,
+      "y": -0.82
+    },
+    "pad": {
+      "x": 0.74,
+      "y": 0.36
+    },
+    "target": {
+      "x": 0.08,
+      "y": -0.02
+    },
+    "actual_path": [
+      {
+        "x": -3.2,
+        "y": -2.35
+      },
+      {
+        "x": -2.72,
+        "y": -2.02
+      },
+      {
+        "x": -2.18,
+        "y": -1.62
+      },
+      {
+        "x": -1.65,
+        "y": -1.21
+      },
+      {
+        "x": -1.15,
+        "y": -0.82
+      }
+    ],
+    "generated_path": [
+      {
+        "x": -2.35,
+        "y": -1.7
+      },
+      {
+        "x": -1.72,
+        "y": -1.18
+      },
+      {
+        "x": -1.05,
+        "y": -0.72
+      },
+      {
+        "x": -0.43,
+        "y": -0.33
+      },
+      {
+        "x": 0.08,
+        "y": -0.02
+      }
+    ],
+    "min_span": 6.0,
+    "grid_m": 1.0
+  },
+  "selected": {
+    "node_id": "DescentAuthority",
+    "reason": "Current trajectory decision checks whether descent is allowed."
+  },
+  "reasoning_trace": [
+    {
+      "step": 1,
+      "description": "VisualStability, AlignmentState, and AttitudeStability support TrackQuality.",
+      "nodes": [
+        "VisualStability",
+        "AlignmentState",
+        "AttitudeStability",
+        "TrackQuality"
+      ],
+      "edges": [
+        "VisualStability__supports__TrackQuality",
+        "AlignmentState__supports__TrackQuality",
+        "AttitudeStability__supports__TrackQuality"
+      ],
+      "confidence": 0.84
+    },
+    {
+      "step": 2,
+      "description": "WindRisk, DragRisk, EnergyEfficiency, AttitudeStability, and VisualStability form OperationalRisk.",
+      "nodes": [
+        "WindRisk",
+        "DragRisk",
+        "EnergyEfficiency",
+        "AttitudeStability",
+        "VisualStability",
+        "OperationalRisk"
+      ],
+      "edges": [
+        "WindRisk__increases__OperationalRisk",
+        "DragRisk__increases__OperationalRisk",
+        "EnergyEfficiency__reduces__OperationalRisk",
+        "AttitudeStability__reduces__OperationalRisk",
+        "VisualStability__reduces__OperationalRisk"
+      ],
+      "confidence": 0.76
+    },
+    {
+      "step": 3,
+      "description": "PadTrack predicts FuturePadPrediction, which selects ApproachAimPoint for guidance.",
+      "nodes": [
+        "PadTrack",
+        "FuturePadPrediction",
+        "ApproachAimPoint"
+      ],
+      "edges": [
+        "PadTrack__predicts__FuturePadPrediction",
+        "FuturePadPrediction__selects__ApproachAimPoint"
+      ],
+      "confidence": 0.62
+    },
+    {
+      "step": 4,
+      "description": "LandingIntent, TrackQuality, and OperationalRisk determine HorizontalGuidance and DescentAuthority.",
+      "nodes": [
+        "LandingIntent",
+        "TrackQuality",
+        "OperationalRisk",
+        "HorizontalGuidance",
+        "DescentAuthority"
+      ],
+      "edges": [
+        "TrackQuality__scales__HorizontalGuidance",
+        "LandingIntent__enables__HorizontalGuidance",
+        "OperationalRisk__limits__HorizontalGuidance",
+        "LandingIntent__enables__DescentAuthority",
+        "OperationalRisk__limits__DescentAuthority"
+      ],
+      "confidence": 0.78
+    },
+    {
+      "step": 5,
+      "description": "DescentAuthority, TrackQuality, and OperationalRisk infer FinalLandReadiness.",
+      "nodes": [
+        "DescentAuthority",
+        "TrackQuality",
+        "OperationalRisk",
+        "FinalLandReadiness"
+      ],
+      "edges": [
+        "DescentAuthority__supports__FinalLandReadiness",
+        "TrackQuality__supports__FinalLandReadiness",
+        "OperationalRisk__limits__FinalLandReadiness"
+      ],
+      "confidence": 0.56
+    }
+  ]
+}

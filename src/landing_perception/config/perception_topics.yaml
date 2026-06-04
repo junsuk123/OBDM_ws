@@ -1,0 +1,8 @@
+topics:
+  marker_visible: /landing/marker_visible
+  marker_confidence: /landing/marker_confidence
+  marker_pose: /landing/marker_pose
+  pad_pose: /landing/pad_pose
+compatibility:
+  existing_visible_topic: /landing_marker/visible
+  existing_pose_topic: /landing_marker/pose

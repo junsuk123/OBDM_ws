@@ -5,6 +5,13 @@ positionError = observation.positionError;
 horizontalSpeed = observation.horizontalSpeed;
 verticalSpeed = abs(observation.verticalSpeed);
 uavVelocity = uavState.velocity;
+markerPosition = get_vector_field(observation, 'markerPosition', [nan, nan, nan]);
+markerVelocity = get_vector_field(observation, 'markerVelocity', [0.0, 0.0, 0.0]);
+if numel(markerPosition) >= 3 && all(isfinite(markerPosition(1:3)))
+    altitudeAbovePad = uavState.altitude - markerPosition(3);
+else
+    altitudeAbovePad = uavState.altitude;
+end
 if ~isfield(windState, 'vector') || isempty(windState.vector)
     windVector = [0.0, 0.0, 0.0];
 else
@@ -38,6 +45,7 @@ yawError = abs(wrap_to_pi(uavState.attitude(3) - deg2rad(cfg.ontology.referenceY
 positionAlignment = 1.0 - normalize_feature(positionError, 0.0, cfg.ontology.positionErrorReference);
 yawAlignment = 1.0 - normalize_feature(yawError, 0.0, deg2rad(cfg.ontology.yawErrorReferenceDeg));
 alignmentState = max(0.0, min(1.0, 0.6 * positionAlignment + 0.4 * yawAlignment));
+relativeDistanceState = max(0.0, min(1.0, positionAlignment));
 
 rollStability = 1.0 - normalize_feature(abs(uavState.attitude(1)), 0.0, deg2rad(cfg.ontology.rollReferenceDeg));
 pitchStability = 1.0 - normalize_feature(abs(uavState.attitude(2)), 0.0, deg2rad(cfg.ontology.pitchReferenceDeg));
@@ -47,7 +55,17 @@ descentError = abs(verticalSpeed - cfg.ontology.targetDescentRate);
 descentStability = 1.0 - normalize_feature(descentError, 0.0, cfg.ontology.descentTolerance);
 descentStability = max(0.0, min(1.0, descentStability));
 
-pathLengthEstimate = sqrt(positionError^2 + max(uavState.altitude - cfg.labeling.touchdownAltitude, 0.0)^2);
+altitudeState = 1.0 - normalize_feature(max(altitudeAbovePad - cfg.labeling.touchdownAltitude, 0.0), ...
+    0.0, cfg.ontology.altitudeApproachReference);
+altitudeState = max(0.0, min(1.0, altitudeState));
+droneSpeedStability = 1.0 - normalize_feature(horizontalSpeed, 0.0, cfg.ontology.droneHorizontalSpeedReference);
+droneMotionStability = max(0.0, min(1.0, ...
+    0.35 * droneSpeedStability + 0.35 * descentStability + 0.30 * attitudeStability));
+roverSpeed = norm(markerVelocity(1:min(2, numel(markerVelocity))));
+roverMotionStability = 1.0 - normalize_feature(roverSpeed, 0.0, cfg.ontology.roverSpeedReference);
+roverMotionStability = max(0.0, min(1.0, roverMotionStability));
+
+pathLengthEstimate = sqrt(positionError^2 + max(altitudeAbovePad - cfg.labeling.touchdownAltitude, 0.0)^2);
 groundSpeed = max(0.25, norm(uavVelocity(1:2)));
 timeToTargetEstimate = pathLengthEstimate / groundSpeed;
 timeEfficiency = 1.0 - normalize_feature(timeToTargetEstimate, 0.0, cfg.ontology.timeToTargetReference);
@@ -65,6 +83,12 @@ semantic.descentStability = descentStability;
 semantic.dragRisk = dragRisk;
 semantic.timeEfficiency = timeEfficiency;
 semantic.energyEfficiency = energyEfficiency;
+semantic.relativeDistanceState = relativeDistanceState;
+semantic.altitudeState = altitudeState;
+semantic.droneMotionStability = droneMotionStability;
+semantic.roverMotionStability = roverMotionStability;
+semantic.altitudeAbovePad = altitudeAbovePad;
+semantic.roverSpeed = roverSpeed;
 semantic.pathLengthEstimate = pathLengthEstimate;
 semantic.timeToTargetEstimate = timeToTargetEstimate;
 semantic.energyCostEstimate = energyCostEstimate;
@@ -72,7 +96,8 @@ semantic.dragForce = dragForce;
 semantic.dragPower = dragPower;
 semantic.relativeAirSpeed = relativeAirSpeed;
 semantic.vector = [windRisk, visualStability, alignmentState, attitudeStability, descentStability, ...
-    dragRisk, timeEfficiency, energyEfficiency];
+    dragRisk, timeEfficiency, energyEfficiency, relativeDistanceState, altitudeState, ...
+    droneMotionStability, roverMotionStability];
 semantic.featureNames = cfg.featureFusion.semanticNames;
 semantic.raw = struct();
 semantic.raw.windSpeed = windState.speed;
@@ -82,9 +107,22 @@ semantic.raw.dragDisturbance = dragDisturbance;
 semantic.raw.relativeAirSpeed = relativeAirSpeed;
 semantic.raw.dragForce = dragForce;
 semantic.raw.dragPower = dragPower;
+semantic.raw.altitudeAbovePad = altitudeAbovePad;
+semantic.raw.roverSpeed = roverSpeed;
 semantic.raw.pathLengthEstimate = pathLengthEstimate;
 semantic.raw.timeToTargetEstimate = timeToTargetEstimate;
 semantic.raw.energyCostEstimate = energyCostEstimate;
+
+function value = get_vector_field(data, fieldName, defaultValue)
+value = defaultValue;
+if isstruct(data) && isfield(data, fieldName) && ~isempty(data.(fieldName))
+    candidate = data.(fieldName);
+    if isnumeric(candidate)
+        value = candidate(:)';
+    end
+end
+
+end
 
 function wrappedAngle = wrap_to_pi(angleValue)
 wrappedAngle = atan2(sin(angleValue), cos(angleValue));

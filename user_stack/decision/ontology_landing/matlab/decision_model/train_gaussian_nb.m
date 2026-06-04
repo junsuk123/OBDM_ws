@@ -45,4 +45,5 @@ model.mean = meanMatrix;
 model.variance = varianceMatrix;
 model.epsilon = cfg.decision.epsilon;
 model.featureCount = featureCount;
+model.featureNames = [cfg.featureFusion.rawNames, cfg.featureFusion.semanticNames];
 model.sampleCount = sampleCount;

@@ -1,0 +1,93 @@
+thresholds:
+  high_wind_mps: 8.0
+  low_wind_mps: 3.0
+  marker_confidence_min: 0.55
+  marker_confidence_final: 0.75
+  direct_descent_distance_m: 1.0
+  minimum_time_distance_m: 4.0
+  platform_speed_safe_mps: 0.3
+  attitude_error_max_deg: 12.0
+  low_altitude_m: 2.0
+  battery_critical_pct: 15.0
+  obstacle_safe_distance_m: 1.5
+
+rules:
+  - name: marker_lost_low_altitude
+    when: "not marker_visible and altitude < low_altitude_m"
+    landing_phase: RESEARCH
+    selected_mode: ASCEND_AND_RESEARCH
+    risk_level: HIGH
+    allowed_to_descend: false
+    abort_required: false
+    explanation: "Marker is lost at low altitude; climb and re-acquire before descent."
+
+  - name: critical_battery_visible_pad
+    when: "battery_level <= battery_critical_pct and marker_visible"
+    landing_phase: EMERGENCY
+    selected_mode: EMERGENCY_LAND
+    risk_level: HIGH
+    allowed_to_descend: true
+    abort_required: false
+    explanation: "Battery is critical but the pad is visible; use constrained emergency landing."
+
+  - name: critical_battery_no_pad
+    when: "battery_level <= battery_critical_pct and not marker_visible"
+    landing_phase: ABORT
+    selected_mode: ABORT_LANDING
+    risk_level: CRITICAL
+    allowed_to_descend: false
+    abort_required: true
+    explanation: "Battery is critical and the landing pad is not reliable."
+
+  - name: high_wind
+    when: "wind_speed > high_wind_mps"
+    landing_phase: APPROACH
+    selected_mode: CONSERVATIVE_APPROACH
+    risk_level: HIGH
+    allowed_to_descend: false
+    abort_required: false
+    explanation: "High wind risk rejects direct descent."
+
+  - name: obstacle_near_path
+    when: "obstacle_distance < obstacle_safe_distance_m"
+    landing_phase: HOLD
+    selected_mode: HOVER_AND_ALIGN
+    risk_level: HIGH
+    allowed_to_descend: false
+    abort_required: false
+    explanation: "Obstacle is inside the safety margin."
+
+  - name: safe_direct_descent
+    when: "marker_visible and marker_confidence > marker_confidence_final and relative_distance < direct_descent_distance_m and platform_speed < platform_speed_safe_mps and wind_speed <= low_wind_mps and attitude_error < attitude_error_max_deg"
+    landing_phase: FINAL
+    selected_mode: DIRECT_DESCENT
+    risk_level: LOW
+    allowed_to_descend: true
+    abort_required: false
+    explanation: "Marker, wind, platform motion, and attitude are safe for final descent."
+
+  - name: minimum_time_when_safe
+    when: "marker_visible and marker_confidence > marker_confidence_min and relative_distance >= minimum_time_distance_m and wind_speed <= low_wind_mps and platform_speed < platform_speed_safe_mps and attitude_error < attitude_error_max_deg"
+    landing_phase: APPROACH
+    selected_mode: MINIMUM_TIME_APPROACH
+    risk_level: LOW
+    allowed_to_descend: true
+    abort_required: false
+    explanation: "Risk is low and the pad is far enough for a minimum-time approach."
+
+  - name: marker_visible_tracking
+    when: "marker_visible and marker_confidence > marker_confidence_min"
+    landing_phase: TRACKING
+    selected_mode: TRACKING_APPROACH
+    risk_level: MEDIUM
+    allowed_to_descend: true
+    abort_required: false
+    explanation: "Marker is usable; track the moving platform with conservative descent limits."
+
+default:
+  landing_phase: HOLD
+  selected_mode: HOVER_AND_ALIGN
+  risk_level: MEDIUM
+  allowed_to_descend: false
+  abort_required: false
+  explanation: "No high-confidence rule matched; hold and align."

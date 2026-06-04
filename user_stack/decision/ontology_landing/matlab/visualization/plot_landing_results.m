@@ -13,17 +13,19 @@ end
 timeVector = results.timeVector;
 if isempty(timeVector)
     warning('[plot_landing_results] No samples were collected; skipping result plots.');
+    plot_no_data_figure(runDir, cfg, visibleFlag, 'No samples were collected for this run.');
     return;
 end
+traceStyle = plot_trace_style(timeVector);
 
 figure('Name', 'Landing Scenario Summary', 'Color', 'w', 'Visible', visibleFlag);
 layout = tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
 title(layout, 'Landing scenario result summary');
 
 nexttile;
-plot(timeVector, results.altitudeVector, 'LineWidth', 1.4); hold on;
+plot(timeVector, results.altitudeVector, traceStyle, 'LineWidth', 1.4); hold on;
 if isfield(results, 'positionErrorVector') && ~isempty(results.positionErrorVector)
-    plot(timeVector, results.positionErrorVector, 'LineWidth', 1.2);
+    plot(timeVector, results.positionErrorVector, traceStyle, 'LineWidth', 1.2);
 end
 add_touchdown_marker(results);
 xlabel('Time (s)');
@@ -73,7 +75,7 @@ title('Touchdown and run summary');
 save_figure_if_needed(gcf, runDir, 'scenario_result_summary', cfg);
 
 figure('Name', 'Wind Profile', 'Color', 'w', 'Visible', visibleFlag);
-plot(timeVector, results.windSpeedVector, 'LineWidth', 1.4);
+plot(timeVector, results.windSpeedVector, traceStyle, 'LineWidth', 1.4);
 add_touchdown_marker(results);
 xlabel('Time (s)');
 ylabel('Wind speed (m/s)');
@@ -83,15 +85,15 @@ save_figure_if_needed(gcf, runDir, 'wind_profile', cfg);
 
 figure('Name', 'UAV Attitude and Altitude', 'Color', 'w', 'Visible', visibleFlag);
 subplot(2, 1, 1);
-plot(timeVector, results.altitudeVector, 'LineWidth', 1.4);
+plot(timeVector, results.altitudeVector, traceStyle, 'LineWidth', 1.4);
 add_touchdown_marker(results);
 ylabel('Altitude (m)');
 title('Altitude');
 grid on;
 subplot(2, 1, 2);
-plot(timeVector, rad2deg(results.rollVector), 'LineWidth', 1.2); hold on;
-plot(timeVector, rad2deg(results.pitchVector), 'LineWidth', 1.2);
-plot(timeVector, rad2deg(results.yawVector), 'LineWidth', 1.2);
+plot(timeVector, rad2deg(results.rollVector), traceStyle, 'LineWidth', 1.2); hold on;
+plot(timeVector, rad2deg(results.pitchVector), traceStyle, 'LineWidth', 1.2);
+plot(timeVector, rad2deg(results.yawVector), traceStyle, 'LineWidth', 1.2);
 add_touchdown_marker(results);
 xlabel('Time (s)');
 ylabel('Angle (deg)');
@@ -103,7 +105,7 @@ save_figure_if_needed(gcf, runDir, 'altitude_attitude', cfg);
 figure('Name', 'Semantic Features', 'Color', 'w', 'Visible', visibleFlag);
 semanticCount = size(results.semanticMatrix, 2);
 semanticNames = cfg.featureFusion.semanticNames(1:min(numel(cfg.featureFusion.semanticNames), semanticCount));
-plot(timeVector, results.semanticMatrix(:, 1:semanticCount), 'LineWidth', 1.2);
+plot(timeVector, results.semanticMatrix(:, 1:semanticCount), traceStyle, 'LineWidth', 1.2);
 add_touchdown_marker(results);
 xlabel('Time (s)');
 ylabel('Normalized score');
@@ -140,10 +142,10 @@ binCount = numel(results.windBinAnalysis);
 proposedLandingRate = zeros(binCount, 1);
 baselineLandingRate = zeros(binCount, 1);
 binLabels = cell(binCount, 1);
-for idx = 1:binCount
-    binLabels{idx} = sprintf('%.0f-%.0f', results.windBinAnalysis(idx).lowerEdge, results.windBinAnalysis(idx).upperEdge);
-    proposedLandingRate(idx) = results.windBinAnalysis(idx).proposed.recall;
-    baselineLandingRate(idx) = results.windBinAnalysis(idx).baseline.recall;
+for binIdx = 1:binCount
+    binLabels{binIdx} = sprintf('%.0f-%.0f', results.windBinAnalysis(binIdx).lowerEdge, results.windBinAnalysis(binIdx).upperEdge);
+    proposedLandingRate(binIdx) = results.windBinAnalysis(binIdx).proposed.recall;
+    baselineLandingRate(binIdx) = results.windBinAnalysis(binIdx).baseline.recall;
 end
 bar([proposedLandingRate, baselineLandingRate]);
 xlabel('Wind-speed bin');
@@ -153,6 +155,9 @@ title('Landing performance by wind-speed bin');
 grid on;
 set(gca, 'XTickLabel', binLabels);
     save_figure_if_needed(gcf, runDir, 'wind_bin_analysis', cfg);
+
+plot_path_generation_results(results, cfg, runDir, visibleFlag);
+plot_reinforcement_reward_results(results, cfg, runDir, visibleFlag);
 
 function summaryLines = build_summary_lines(results, cfg)
     summaryLines = {
@@ -171,6 +176,15 @@ function summaryLines = build_summary_lines(results, cfg)
             sprintf('Touchdown altitude  : %.3f m', results.touchdown.altitude)
             sprintf('Touchdown pos error : %.3f m', results.touchdown.positionError)
             sprintf('Touchdown Vz        : %.3f m/s', results.touchdown.verticalSpeed)
+            }];
+    end
+    if isfield(results, 'pathGeneration') && isfield(results.pathGeneration, 'summary')
+        pathSummary = results.pathGeneration.summary;
+        summaryLines = [summaryLines; {
+            sprintf('Path mean error    : %.3f m', pathSummary.meanTrackingError)
+            sprintf('Path final error   : %.3f m', pathSummary.finalTrackingError)
+            sprintf('Path efficiency    : %.3f', pathSummary.pathEfficiency)
+            sprintf('Command coverage   : %.3f', pathSummary.commandCoverage)
             }];
     end
 end
@@ -213,8 +227,213 @@ function save_figure_if_needed(figHandle, runDir, baseName, cfg)
     if ~cfg.visualization.saveFigures
         return;
     end
+    if ~exist(runDir, 'dir')
+        mkdir(runDir);
+    end
     pngPath = fullfile(runDir, [baseName '.png']);
     saveas(figHandle, pngPath);
+end
+
+function style = plot_trace_style(timeVector)
+    if numel(timeVector) < 2
+        style = 'o-';
+    else
+        style = '-';
+    end
+end
+
+function plot_no_data_figure(runDir, cfg, visibleFlag, message)
+    if ~cfg.visualization.enabled
+        return;
+    end
+    figure('Name', 'No Result Data', 'Color', 'w', 'Visible', visibleFlag);
+    axis off;
+    text(0.5, 0.5, message, 'Units', 'normalized', ...
+        'HorizontalAlignment', 'center', 'FontSize', 12, 'FontWeight', 'bold');
+    save_figure_if_needed(gcf, runDir, 'no_result_data', cfg);
+end
+
+function plot_path_generation_results(results, cfg, runDir, visibleFlag)
+    if ~isfield(results, 'pathGeneration') || ~isfield(results.pathGeneration, 'scenario') || ...
+            isempty(results.pathGeneration.scenario)
+        return;
+    end
+
+    scenarioMetrics = results.pathGeneration.scenario;
+    scenarioIds = [scenarioMetrics.scenarioIndex];
+
+    figure('Name', 'Path Generation Metric Dashboard', 'Color', 'w', 'Visible', visibleFlag);
+    layout = tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+    title(layout, 'Path generation performance metrics');
+
+    nexttile;
+    bar(scenarioIds, [[scenarioMetrics.meanTrackingError]' [scenarioMetrics.finalTrackingError]']);
+    xlabel('Scenario');
+    ylabel('Error (m)');
+    legend({'Mean tracking error', 'Final tracking error'}, 'Location', 'best');
+    title('Pad tracking accuracy');
+    grid on;
+
+    nexttile;
+    bar(scenarioIds, [[scenarioMetrics.pathEfficiency]' [scenarioMetrics.targetPathEfficiency]']);
+    xlabel('Scenario');
+    ylabel('Efficiency');
+    ylim([0 1]);
+    legend({'UAV path', 'Generated target path'}, 'Location', 'best');
+    title('Straight-line efficiency');
+    grid on;
+
+    nexttile;
+    bar(scenarioIds, [[scenarioMetrics.commandCoverage]' [scenarioMetrics.markerCoverage]']);
+    xlabel('Scenario');
+    ylabel('Coverage');
+    ylim([0 1]);
+    legend({'Command target', 'Marker/pad track'}, 'Location', 'best');
+    title('Guidance availability');
+    grid on;
+
+    nexttile;
+    yyaxis left;
+    bar(scenarioIds, [scenarioMetrics.targetSmoothness]');
+    ylabel('Target smoothness (m/s^2)');
+    yyaxis right;
+    plot(scenarioIds, [scenarioMetrics.meanApproachStep]', '-o', 'LineWidth', 1.4);
+    ylabel('Mean approach step (m)');
+    xlabel('Scenario');
+    title('Command smoothness and step size');
+    grid on;
+    save_figure_if_needed(gcf, runDir, 'path_generation_metric_dashboard', cfg);
+
+    figure('Name', 'Path Tracking Time Series', 'Color', 'w', 'Visible', visibleFlag);
+    layout = tiledlayout(3, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
+    title(layout, 'Path tracking and ontology guidance signals');
+    for scenarioIdx = 1:numel(scenarioMetrics)
+        ts = scenarioMetrics(scenarioIdx).timeSeries;
+        label = sprintf('S%d', scenarioMetrics(scenarioIdx).scenarioIndex);
+        style = plot_trace_style(ts.time);
+        nexttile(1);
+        plot(ts.time, ts.trackingError, style, 'DisplayName', label, 'LineWidth', 1.1); hold on;
+        nexttile(2);
+        plot(ts.time, ts.approachStep, style, 'DisplayName', label, 'LineWidth', 1.1); hold on;
+        nexttile(3);
+        plot(ts.time, ts.trackQuality, style, 'DisplayName', [label ' track'], 'LineWidth', 1.1); hold on;
+        plot(ts.time, ts.risk, marker_style('--', style), 'DisplayName', [label ' risk'], 'LineWidth', 1.0);
+    end
+    nexttile(1);
+    yline(cfg.guidance.alignRadius, ':', 'Align radius', 'HandleVisibility', 'off');
+    yline(cfg.guidance.finalLandRadius, '--', 'Final radius', 'HandleVisibility', 'off');
+    ylabel('Error (m)');
+    title('Distance to moving landing pad');
+    grid on;
+    legend('Location', 'best');
+    nexttile(2);
+    ylabel('Step (m)');
+    title('Generated approach step');
+    grid on;
+    legend('Location', 'best');
+    nexttile(3);
+    xlabel('Time (s)');
+    ylabel('Ontology score');
+    title('Track quality and operational risk');
+    ylim([0 1]);
+    grid on;
+    legend('Location', 'best');
+    save_figure_if_needed(gcf, runDir, 'path_tracking_time_series', cfg);
+
+    plot_topdown_paths(scenarioMetrics, cfg, runDir, visibleFlag);
+end
+
+function plot_topdown_paths(scenarioMetrics, cfg, runDir, visibleFlag)
+    scenarioCount = min(numel(scenarioMetrics), 4);
+    if scenarioCount == 0
+        return;
+    end
+    figure('Name', 'Generated Path Top-down View', 'Color', 'w', 'Visible', visibleFlag);
+    rows = ceil(scenarioCount / 2);
+    cols = min(2, scenarioCount);
+    layout = tiledlayout(rows, cols, 'TileSpacing', 'compact', 'Padding', 'compact');
+    title(layout, 'Top-down UAV, landing pad, and generated target paths');
+    for scenarioIdx = 1:scenarioCount
+        ts = scenarioMetrics(scenarioIdx).timeSeries;
+        nexttile;
+        plot_xy(ts.pad, 'g-', 'Landing pad'); hold on;
+        plot_xy(ts.target, 'm--', 'Generated target');
+        plot_xy(ts.uav, 'b-', 'UAV');
+        mark_endpoint(ts.pad, 'go');
+        mark_endpoint(ts.target, 'mo');
+        mark_endpoint(ts.uav, 'bo');
+        xlabel('X (m)');
+        ylabel('Y (m)');
+        title(sprintf('Scenario %d', scenarioMetrics(scenarioIdx).scenarioIndex));
+        axis equal;
+        grid on;
+        legend('Location', 'best');
+    end
+    save_figure_if_needed(gcf, runDir, 'path_topdown_comparison', cfg);
+end
+
+function plot_reinforcement_reward_results(results, cfg, runDir, visibleFlag)
+    if ~isfield(results, 'reinforcementTraining') || ...
+            ~isfield(results.reinforcementTraining, 'episodes') || isempty(results.reinforcementTraining.episodes)
+        return;
+    end
+    episodes = results.reinforcementTraining.episodes;
+    figure('Name', 'Reinforcement Reward Smoothness', 'Color', 'w', 'Visible', visibleFlag);
+    layout = tiledlayout(2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
+    title(layout, 'Smoothness-aware reinforcement reward');
+    for episodeIdx = 1:numel(episodes)
+        episode = episodes(episodeIdx);
+        label = sprintf('S%d', episode.scenarioIndex);
+        style = plot_trace_style(episode.time);
+        nexttile(1);
+        plot(episode.time, episode.reward, style, 'DisplayName', label, 'LineWidth', 1.1); hold on;
+        nexttile(2);
+        plot(episode.time, episode.components.smoothness, style, 'DisplayName', [label ' smoothness'], 'LineWidth', 1.1); hold on;
+        plot(episode.time, episode.components.tracking, marker_style('--', style), 'DisplayName', [label ' tracking'], 'LineWidth', 1.0);
+    end
+    nexttile(1);
+    ylabel('Reward');
+    title('Per-step RL reward');
+    grid on;
+    legend('Location', 'best');
+    nexttile(2);
+    xlabel('Time (s)');
+    ylabel('Component score');
+    ylim([0 1]);
+    title('Smoothness and tracking reward components');
+    grid on;
+    legend('Location', 'best');
+    save_figure_if_needed(gcf, runDir, 'reinforcement_reward_smoothness', cfg);
+end
+
+function plot_xy(points, style, labelText)
+    if isempty(points) || size(points, 2) < 2
+        return;
+    end
+    valid = all(isfinite(points(:, 1:2)), 2);
+    if ~any(valid)
+        return;
+    end
+    plot(points(valid, 1), points(valid, 2), style, 'DisplayName', labelText, 'LineWidth', 1.2);
+end
+
+function style = marker_style(baseStyle, traceStyle)
+    style = baseStyle;
+    if contains(traceStyle, 'o')
+        style = [baseStyle 'o'];
+    end
+end
+
+function mark_endpoint(points, style)
+    if isempty(points) || size(points, 2) < 2
+        return;
+    end
+    validIdx = find(all(isfinite(points(:, 1:2)), 2), 1, 'last');
+    if isempty(validIdx)
+        return;
+    end
+    plot(points(validIdx, 1), points(validIdx, 2), style, ...
+        'MarkerFaceColor', style(1), 'HandleVisibility', 'off');
 end
 
 end

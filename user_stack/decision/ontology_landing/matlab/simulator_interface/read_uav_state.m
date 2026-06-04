@@ -126,12 +126,21 @@ end
 
 function [ok, vector] = read_ros_vector_field(topic, fieldName)
 ok = false;
-vector = [0.0, 0.0, 0.0];
-cmd = sprintf(['timeout 1 %s bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
-    'export ROS_DOMAIN_ID=0; timeout 0.7 ros2 topic echo "%s" nav_msgs/msg/Odometry --once --field "%s" 2>/dev/null'''], ...
-    clean_env_command_prefix(), topic, fieldName);
-[status, output] = system(cmd);
-if status ~= 0 || isempty(strtrim(output))
+vector = [nan, nan, nan];
+qosProfiles = {'reliable', 'best_effort', 'system_default'};
+output = '';
+for idx = 1:numel(qosProfiles)
+    cmd = sprintf(['timeout 2 %s bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
+        'export ROS_DOMAIN_ID=0; timeout 1.4 ros2 topic echo --no-daemon --spin-time 0.4 ' ...
+        '--qos-reliability %s --once --field "%s" "%s" nav_msgs/msg/Odometry 2>/dev/null'''], ...
+        clean_env_command_prefix(), qosProfiles{idx}, fieldName, topic);
+    [status, candidate] = system(cmd);
+    if status == 0 && ~isempty(strtrim(candidate))
+        output = candidate;
+        break;
+    end
+end
+if isempty(strtrim(output))
     return;
 end
 
@@ -154,7 +163,8 @@ end
 function prefix = clean_env_command_prefix()
 keys = {'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'DISPLAY', ...
     'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', ...
-    'RMW_IMPLEMENTATION', 'ROS_LOCALHOST_ONLY'};
+    'RMW_IMPLEMENTATION', 'ROS_LOCALHOST_ONLY', 'CYCLONEDDS_URI', ...
+    'FASTRTPS_DEFAULT_PROFILES_FILE'};
 defaults = struct('SHELL', '/bin/bash', 'LANG', 'C.UTF-8');
 parts = {'env -i'};
 for i = 1:numel(keys)

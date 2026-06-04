@@ -26,6 +26,35 @@ The Gaussian Naive Bayes posterior is:
 p(y = c | x) proportional to p(y = c) * product_i N(x_i | mu_ci, sigma_ci^2)
 ```
 
+For online guidance, the landing controller now evaluates one explicit ontology network:
+
+```text
+raw state / marker / wind evidence
+  -> semantic nodes
+     WindRisk, DragRisk, VisualStability, AlignmentState,
+     AttitudeStability, DescentStability, TimeEfficiency, EnergyEfficiency
+  -> inference nodes
+     OperationalRisk, TrackQuality, LandingIntent
+  -> trajectory nodes
+     FuturePadPrediction, ApproachAimPoint, HorizontalGuidance,
+     DescentAuthority, FinalLandReadiness
+  -> command
+     local setpoint or final LAND/DISARM
+```
+
+The graph is evaluated by `ontology_features/evaluate_landing_ontology_graph.m`.
+`send_decision_command.m` consumes the graph values directly when generating
+the landing trajectory, so lead time, future pad prediction, horizontal step,
+descent rate, and final landing readiness all come from the same semantic
+network instead of separate ad hoc guidance rules.
+
+The realtime Python trajectory generator is the default guidance setpoint
+publisher for the integrated Gazebo/ArduPilot run. The MATLAB ontology graph is
+still evaluated and logged, but the realtime generator keeps the XY guidance
+stream moving while the MATLAB graph trajectory path is being validated. Set
+`OBDM_ENABLE_REALTIME_TRAJECTORY_GENERATOR=0` or module config
+`useRealtimeTrajectoryGenerator=false` only for MATLAB-only trajectory debugging.
+
 ## Folder layout
 
 ```text

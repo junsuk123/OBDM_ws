@@ -1,0 +1,14 @@
+std_msgs/Header header
+geometry_msgs/PoseStamped uav_pose
+geometry_msgs/TwistStamped uav_velocity
+geometry_msgs/PoseStamped platform_pose
+geometry_msgs/TwistStamped platform_velocity
+geometry_msgs/PoseStamped relative_pose
+float32 relative_distance
+bool marker_visible
+float32 marker_confidence
+float32 wind_speed
+float32 wind_direction
+float32 attitude_error
+float32 altitude
+float32 battery_level

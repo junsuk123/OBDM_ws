@@ -260,6 +260,20 @@ Visualization Manager:
                 Reliability Policy: Reliable
                 Value: /obdm/current_guidance_target
               Value: true
+            - Class: rviz_default_plugins/Image
+              Enabled: true
+              Max Value: 1
+              Median window: 5
+              Min Value: 0
+              Name: Top-down Guidance Projection
+              Normalize Range: true
+              Topic:
+                Depth: 5
+                Durability Policy: Volatile
+                History Policy: Keep Last
+                Reliability Policy: Reliable
+                Value: /obdm/topdown_projection_image
+              Value: true
           Enabled: true
           Name: Vehicle State
         - Class: rviz_common/Group
@@ -281,7 +295,7 @@ Visualization Manager:
                   Scale: 1
                   Value: true
                 Value: false
-              Enabled: true
+              Enabled: false
               Keep: 1
               Name: Camera Target Estimate
               Position Tolerance: 0.05000000074505806
@@ -302,7 +316,7 @@ Visualization Manager:
                 History Policy: Keep Last
                 Reliability Policy: Reliable
                 Value: /landing_marker/odom
-              Value: true
+              Value: false
             - Angle Tolerance: 0.05000000074505806
               Class: rviz_default_plugins/Odometry
               Covariance:
@@ -342,12 +356,25 @@ Visualization Manager:
                 Reliability Policy: Reliable
                 Value: /landing_marker/ground_truth/odom
               Value: false
+            - Class: rviz_default_plugins/MarkerArray
+              Enabled: true
+              Name: Rover And Landing Pad Boxes
+              Namespaces:
+                landing_target_pad: true
+                landing_target_rover: true
+              Topic:
+                Depth: 10
+                Durability Policy: Volatile
+                History Policy: Keep Last
+                Reliability Policy: Reliable
+                Value: /landing_marker/ground_truth/box_markers
+              Value: true
             - Alpha: 1
               Axes Length: 1
               Axes Radius: 0.10000000149011612
               Class: rviz_default_plugins/Pose
               Color: 255; 130; 40
-              Enabled: true
+              Enabled: false
               Head Length: 0.18000000715255737
               Head Radius: 0.07999999821186066
               Name: Camera Target Pose
@@ -361,7 +388,7 @@ Visualization Manager:
                 History Policy: Keep Last
                 Reliability Policy: Reliable
                 Value: /landing_marker/pose
-              Value: true
+              Value: false
           Enabled: true
           Name: Landing Target
         - Class: rviz_common/Group
@@ -412,7 +439,7 @@ Visualization Manager:
           Displays:
             - Class: rviz_default_plugins/Marker
               Enabled: true
-              Name: Wind Arrow
+              Name: Wind Particles
               Namespaces:
                 {}
               Topic:

@@ -1,0 +1,8 @@
+controller:
+  kp_xy: 0.8
+  kp_z: 0.6
+  max_xy_speed_mps: 2.0
+  max_z_speed_mps: 0.7
+  command_topic: /cmd_vel
+  reference_topic: /landing/reference_pose
+  safety_topic: /landing/safety_status

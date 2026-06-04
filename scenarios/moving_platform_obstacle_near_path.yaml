@@ -1,0 +1,15 @@
+scenario: moving_platform_obstacle_near_path
+description: Moving platform with obstacle near landing path.
+platform:
+  moving: true
+  speed_mps: 0.3
+wind_profile: none
+marker:
+  temporary_loss: false
+obstacles:
+  - name: path_blocker
+    position_m: [2.0, 0.5, 0.0]
+    radius_m: 0.7
+expected_decision_modes:
+  - HOVER_AND_ALIGN
+  - ABORT_LANDING

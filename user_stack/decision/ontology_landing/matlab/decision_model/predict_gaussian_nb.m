@@ -15,6 +15,19 @@ if isvector(featureMatrix)
 end
 
 sampleCount = size(featureMatrix, 1);
+if isfield(model, 'featureCount') && model.featureCount ~= size(featureMatrix, 2)
+    predictedLabel = zeros(sampleCount, 1);
+    classProbability = repmat([1.0, 0.0], sampleCount, 1);
+    confidence = ones(sampleCount, 1);
+    predictedAction = repmat({'HOVER'}, sampleCount, 1);
+    if sampleCount == 1
+        predictedLabel = predictedLabel(1);
+        classProbability = classProbability(1, :);
+        confidence = confidence(1);
+        predictedAction = predictedAction{1};
+    end
+    return;
+end
 classCount = numel(model.classLabels);
 logPosterior = zeros(sampleCount, classCount);
 

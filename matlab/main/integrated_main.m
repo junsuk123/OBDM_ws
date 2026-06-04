@@ -128,7 +128,7 @@ try
     target_mod = [];
     airspeed_bridge_pid = '';
     virtual_wind_pid = '';
-    wind_arrow_pid = '';
+    wind_visualizer_pid = '';
     world_name = getenv('OBDM_WORLD_NAME');
     if isempty(world_name)
         world_name = 'runway';
@@ -157,9 +157,9 @@ try
     end
 
     try
-        wind_arrow_pid = start_wind_arrow_visualizer(ns);
+        wind_visualizer_pid = start_wind_visualizer(ns);
     catch ME
-        fprintf('[integrated_main] Warning: Wind arrow visualizer failed to start: %s\n', ME.message);
+        fprintf('[integrated_main] Warning: Wind visualizer failed to start: %s\n', ME.message);
     end
 
     try
@@ -444,7 +444,7 @@ try
     else
         stop_background_pid(airspeed_bridge_pid, 'Airspeed relay');
         stop_background_pid(virtual_wind_pid, 'Virtual wind sensor');
-        stop_background_pid(wind_arrow_pid, 'Wind arrow visualizer');
+        stop_background_pid(wind_visualizer_pid, 'Wind visualizer');
     end
 
     fprintf('\n═════════════════════════════════════\n');
@@ -493,8 +493,8 @@ catch ME
         if exist('virtual_wind_pid', 'var') && ~strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
             stop_background_pid(virtual_wind_pid, 'Virtual wind sensor');
         end
-        if exist('wind_arrow_pid', 'var') && ~strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
-            stop_background_pid(wind_arrow_pid, 'Wind arrow visualizer');
+        if exist('wind_visualizer_pid', 'var') && ~strcmpi(getenv('OBDM_SKIP_CLEANUP'), '1')
+            stop_background_pid(wind_visualizer_pid, 'Wind visualizer');
         end
     catch
     end
@@ -550,13 +550,13 @@ function pid = start_virtual_wind_sensor(ns, world_name)
     end
 end
 
-function pid = start_wind_arrow_visualizer(ns)
+function pid = start_wind_visualizer(ns)
     pid = '';
     repo_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
     script_path = fullfile(repo_root, 'simulator', 'visualization', 'wind_arrow_marker_node.py');
     ardu_ws = SimulationConfig.get_ardu_ws_path();
 
-    log_file = '/tmp/obdm_wind_arrow_visualizer.log';
+    log_file = '/tmp/obdm_wind_visualizer.log';
     cmd = sprintf(['bash -lc ''source /opt/ros/humble/setup.bash; ' ...
         'if [ -f "%s/install/setup.bash" ]; then source "%s/install/setup.bash"; fi; ' ...
         'export ROS_DOMAIN_ID=0; export GZ_VERSION=harmonic; ' ...
@@ -565,9 +565,9 @@ function pid = start_wind_arrow_visualizer(ns)
     [status, output] = system(cmd);
     if status == 0
         pid = strtrim(output);
-        fprintf('[integrated_main] Wind arrow visualizer started (PID: %s, log: %s)\n', pid, log_file);
+        fprintf('[integrated_main] Wind visualizer started (PID: %s, log: %s)\n', pid, log_file);
     else
-        fprintf('[integrated_main] Wind arrow visualizer start command failed: %s\n', strtrim(output));
+        fprintf('[integrated_main] Wind visualizer start command failed: %s\n', strtrim(output));
     end
 end
 

@@ -27,11 +27,12 @@ try
 
     sanitize_runtime_environment_local();
     setenv('ROS_DOMAIN_ID', num2str(cfg.simulation.rosDomainId));
-    setenv('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp');
+    if isempty(getenv('RMW_IMPLEMENTATION'))
+        setenv('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp');
+    end
     if isempty(getenv('ROS_LOCALHOST_ONLY'))
         setenv('ROS_LOCALHOST_ONLY', '0');
     end
-    setenv('CYCLONEDDS_URI', '');
     setenv('GZ_VERSION', cfg.simulation.gzVersion);
     if isempty(getenv('DISPLAY'))
         setenv('DISPLAY', ':0');
@@ -43,7 +44,10 @@ try
     end
 
     sim.launcher = SimulationManager('verbose', cfg.runtime.verbose);
-    sim.launcher = sim.launcher.initialize();
+    sim.launcher = sim.launcher.initialize( ...
+        'reset_method', cfg.simulation.resetMethod, ...
+        'world_name', cfg.simulator.gazeboWorldName, ...
+        'soft_reset_config', cfg.simulator.reset);
 
     if strcmpi(strtrim(cfg.simulation.runMode), 'ap_dds_plane')
         if ~isfield(cfg.simulation, 'apDdsSensorConfig') || isempty(fieldnames(cfg.simulation.apDdsSensorConfig))

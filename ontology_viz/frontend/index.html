@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ontology Graph Viewer</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <section class="toolbar" aria-label="Graph controls">
+          <div class="field-row">
+            <label for="sourceInput">Source</label>
+            <input id="sourceInput" type="text" value="http://127.0.0.1:8765/events">
+            <button id="loadButton" type="button" title="Load source">Load</button>
+          </div>
+          <div class="button-row">
+            <button id="liveButton" type="button" title="Auto-reconnect live server-sent events">Auto Live</button>
+            <button id="pollButton" type="button" title="Poll source URL once per second">Poll</button>
+            <button id="resetButton" type="button" title="Reset graph view">Reset</button>
+          </div>
+          <div class="field-row">
+            <label for="searchInput">Search</label>
+            <input id="searchInput" type="search" placeholder="Node or edge label">
+          </div>
+          <label class="toggle">
+            <input id="inferredToggle" type="checkbox" checked>
+            <span>Inferred facts</span>
+          </label>
+          <label class="toggle">
+            <input id="traceToggle" type="checkbox" checked>
+            <span>Reasoning path</span>
+          </label>
+        </section>
+
+        <section>
+          <h2>Node Types</h2>
+          <div id="nodeTypeFilters" class="filter-list"></div>
+        </section>
+
+        <section>
+          <h2>Edge Types</h2>
+          <div id="edgeTypeFilters" class="filter-list"></div>
+        </section>
+      </aside>
+
+      <section class="graph-panel">
+        <header class="graph-header">
+          <div>
+            <h1 id="graphTitle">Ontology Graph</h1>
+            <p id="graphMeta">No graph loaded</p>
+          </div>
+          <div id="statusLine" class="status-line">idle</div>
+        </header>
+        <svg id="graphSvg" role="img" aria-label="Ontology graph visualization">
+          <g id="viewport">
+            <g id="edgeLayer"></g>
+            <g id="nodeLayer"></g>
+          </g>
+        </svg>
+      </section>
+
+      <aside class="inspector">
+        <section>
+          <h2>Metadata</h2>
+          <pre id="metadataPanel">{}</pre>
+        </section>
+        <section>
+          <h2>Reasoning Trace</h2>
+          <div id="tracePanel" class="trace-list"></div>
+        </section>
+      </aside>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

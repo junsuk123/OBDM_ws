@@ -29,8 +29,15 @@ cfg.simulation.postLaunchWaitSec = 15;
 cfg.simulation.rosDomainId = 0;
 cfg.simulation.gzVersion = 'harmonic';
 cfg.simulation.allowFallbackToMock = false;
+cfg.simulation.forceInitialHardReset = true;
 cfg.simulation.logEveryNSteps = 10;
 cfg.simulation.stopOnTouchdown = true;
+resetMethodEnv = getenv('OBDM_RESET_METHOD');
+if isempty(resetMethodEnv)
+    cfg.simulation.resetMethod = 'soft';
+else
+    cfg.simulation.resetMethod = lower(strtrim(resetMethodEnv));
+end
 
 cfg.runtime = struct();
 cfg.runtime.verbose = true;
@@ -55,6 +62,16 @@ cfg.simulator.rosReadEveryNSteps = 5;
 cfg.simulator.publishWindToGazebo = true;
 cfg.simulator.windPublishPeriod = 1.0;
 cfg.simulator.gazeboWorldName = 'runway';
+cfg.simulator.reset = struct();
+cfg.simulator.reset.request = 'pose';
+cfg.simulator.reset.gazeboServiceTimeoutMs = 2000;
+cfg.simulator.reset.settleSeconds = 0.25;
+cfg.simulator.reset.poseSampleTimeoutSeconds = 1.5;
+cfg.simulator.reset.rosCleanupGraceSeconds = 0.4;
+cfg.simulator.reset.models = struct( ...
+    'name', {'iris', 'r1_rover'}, ...
+    'position', {[0.0, 0.0, 0.2], [5.0, 0.0, 0.05]}, ...
+    'tolerance', {0.75, 0.35});
 
 cfg.communication = struct();
 cfg.communication.uavStateTopic = '/iris/odometry';
@@ -94,6 +111,9 @@ cfg.ontology.verticalSpeedReference = 1.2;
 cfg.ontology.targetDescentRate = 0.55;
 cfg.ontology.descentTolerance = 0.75;
 cfg.ontology.tagVisibleAltitude = 6.0;
+cfg.ontology.altitudeApproachReference = cfg.ontology.tagVisibleAltitude;
+cfg.ontology.droneHorizontalSpeedReference = 3.0;
+cfg.ontology.roverSpeedReference = 1.2;
 cfg.ontology.tagDetectionThreshold = 0.65;
 cfg.ontology.airDensity = 1.2041;
 cfg.ontology.dragCoefficient = 1.05;
@@ -111,7 +131,8 @@ cfg.featureFusion.rawMin = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 cfg.featureFusion.rawMax = [18.0, 4.0, 10.0, 6.0, 14.0, 5.0, 1.0, 1.0, 1.0];
 cfg.featureFusion.semanticNames = { ...
     'windRisk', 'visualStability', 'alignmentState', 'attitudeStability', 'descentStability', ...
-    'dragRisk', 'timeEfficiency', 'energyEfficiency'};
+    'dragRisk', 'timeEfficiency', 'energyEfficiency', 'relativeDistanceState', 'altitudeState', ...
+    'droneMotionStability', 'roverMotionStability'};
 
 cfg.decision = struct();
 cfg.decision.classNames = {'HOVER', 'LAND'};
@@ -126,23 +147,28 @@ cfg.guidance.enabled = true;
 cfg.guidance.trajectorySource = 'ontology';
 cfg.guidance.commandPeriod = 0.2;
 cfg.guidance.navigationConstant = 1.2;
-cfg.guidance.maxHorizontalStep = 0.35;
+cfg.guidance.maxHorizontalStep = 1.20;
 cfg.guidance.maxLeadTime = 2.0;
-cfg.guidance.smoothingAlpha = 0.85;
+cfg.guidance.smoothingAlpha = 0.25;
 cfg.guidance.alignRadius = 0.75;
 cfg.guidance.finalLandRadius = 0.35;
 cfg.guidance.finalLandAltitude = 0.8;
 cfg.guidance.descentRate = 0.25;
 cfg.guidance.searchAltitude = cfg.simulator.takeoffAltitude + 2.0;
-cfg.guidance.ontologyMinNavigationConstant = 0.80;
-cfg.guidance.ontologyMaxNavigationConstant = 2.40;
-cfg.guidance.ontologyMinHorizontalStep = 0.18;
-cfg.guidance.ontologyMaxHorizontalStep = 2.20;
-cfg.guidance.ontologyMinApproachStep = 0.45;
-cfg.guidance.ontologyDistancePriority = 0.55;
-cfg.guidance.ontologyMinLeadTime = 0.80;
-cfg.guidance.ontologyMaxLeadTime = 3.50;
-cfg.guidance.ontologyLeadDistanceGain = 0.35;
+cfg.guidance.ontologyMinNavigationConstant = 1.50;
+cfg.guidance.ontologyMaxNavigationConstant = 4.80;
+cfg.guidance.ontologyMinHorizontalStep = 0.45;
+cfg.guidance.ontologyMaxHorizontalStep = 12.00;
+cfg.guidance.ontologyMinApproachStep = 1.20;
+cfg.guidance.ontologyDistancePriority = 0.65;
+cfg.guidance.ontologyMinLeadTime = 1.20;
+cfg.guidance.ontologyMaxLeadTime = 4.50;
+cfg.guidance.ontologyLeadDistanceGain = 0.90;
+cfg.guidance.horizontalResponseScale = 1.75;
+cfg.guidance.ontologyPredictionSteps = 8;
+cfg.guidance.ontologyPredictionStepTime = 0.35;
+cfg.guidance.ontologyPredictionHorizon = 6.00;
+cfg.guidance.ontologyFuturePointBlend = 0.82;
 cfg.guidance.markerLostClimbRate = 1.20;
 cfg.guidance.ontologyMinDescentRate = 0.15;
 cfg.guidance.ontologyMaxDescentRate = 0.80;
@@ -155,6 +181,11 @@ cfg.guidance.ontologyFinalLandMaxWindRisk = 0.78;
 cfg.guidance.padEkfProcessNoisePosition = 0.04;
 cfg.guidance.padEkfProcessNoiseVelocity = 0.12;
 cfg.guidance.padEkfMeasurementNoise = 0.18;
+cfg.guidance.touchdownHeightAbovePad = 0.15;
+cfg.guidance.directLandRadius = 0.65;
+cfg.guidance.directLandAltitudeAbovePad = 1.20;
+cfg.guidance.directLandStableTime = 0.70;
+cfg.guidance.directLandMaxHorizontalSpeed = 1.20;
 
 cfg.labeling = struct();
 cfg.labeling.safeAltitude = 0.55;
@@ -169,15 +200,32 @@ cfg.labeling.touchdownPositionError = 1.15;
 cfg.labeling.touchdownGroundAltitude = 0.85;
 cfg.labeling.touchdownGroundPositionError = 1.35;
 cfg.labeling.touchdownMaxAbsVz = 2.50;
+cfg.labeling.contactArmingAltitude = 1.50;
+cfg.labeling.contactMinFlightTime = 3.00;
+cfg.labeling.contactMinSamples = 10;
 
 cfg.evaluation = struct();
 cfg.evaluation.windBins = [0, 2, 4, 6, 8, 10, 12, inf];
 cfg.evaluation.positiveClassLabel = 1;
 
+cfg.reinforcement = struct();
+cfg.reinforcement.enabled = true;
+cfg.reinforcement.trackingErrorReference = cfg.ontology.positionErrorReference;
+cfg.reinforcement.targetSmoothnessReference = 4.0;
+cfg.reinforcement.smoothnessWeight = 0.22;
+cfg.reinforcement.trackingWeight = 0.30;
+cfg.reinforcement.efficiencyWeight = 0.16;
+cfg.reinforcement.coverageWeight = 0.10;
+cfg.reinforcement.trackQualityWeight = 0.12;
+cfg.reinforcement.riskWeight = 0.10;
+cfg.reinforcement.successBonus = 1.0;
+cfg.reinforcement.failurePenalty = 1.0;
+
 cfg.visualization = struct();
 cfg.visualization.enabled = true;
 cfg.visualization.saveFigures = true;
 cfg.visualization.visible = false;
+cfg.visualization.showOntologyGraph = true;
 
 cfg.results = struct();
 cfg.results.outputDir = '';

@@ -1,0 +1,15 @@
+landing_namespace: /landing
+compatibility_sources:
+  mavros_pose: /mavros/local_position/pose
+  mavros_velocity: /mavros/local_position/velocity_local
+  existing_marker_visible: /landing_marker/visible
+  existing_marker_pose: /landing_marker/pose
+  existing_wind_sensor: /iris/wind_sensor
+outputs:
+  state: /landing/state
+  decision: /landing/decision
+  reference_pose: /landing/reference_pose
+  reference_path: /landing/reference_path
+  safety_status: /landing/safety_status
+  allowed_to_descend: /landing/allowed_to_descend
+  command_velocity: /cmd_vel

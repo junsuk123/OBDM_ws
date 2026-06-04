@@ -1,0 +1,11 @@
+limits:
+  obstacle_safe_distance_m: 1.5
+  rover_body_safe_distance_m: 0.8
+  pad_radius_m: 0.45
+  max_descent_speed_mps: 0.6
+  max_horizontal_speed_near_pad_mps: 1.2
+  max_attitude_error_deg: 12.0
+  final_marker_confidence_min: 0.75
+  wind_speed_max_mps: 8.0
+  platform_speed_max_mps: 1.0
+  minimum_altitude_m: 0.2

@@ -1,0 +1,10 @@
+topics:
+  uav_pose: /mavros/local_position/pose
+  uav_velocity: /mavros/local_position/velocity_local
+  platform_pose: /landing/pad_pose
+  platform_velocity: /landing/platform_velocity
+  marker_visible: /landing/marker_visible
+  marker_confidence: /landing/marker_confidence
+  wind_sensor: /iris/wind_sensor
+  battery: /mavros/battery
+  output_state: /landing/state

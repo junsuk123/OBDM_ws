@@ -1,0 +1,9 @@
+std_msgs/Header header
+bool safe
+bool obstacle_clear
+bool marker_reliable
+bool wind_safe
+bool platform_motion_safe
+bool attitude_safe
+float32 safety_margin
+string reason

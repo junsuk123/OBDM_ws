@@ -13,7 +13,7 @@ source ./setup_env.sh
 - `OBDM_ARDU_WS`
 - `ROS_DOMAIN_ID=0`
 - `ROS_LOCALHOST_ONLY=0`
-- `RMW_IMPLEMENTATION=rmw_fastrtps_cpp`
+- `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` unless already set
 - `GZ_VERSION=harmonic`
 
 ## Integrated Ontology Landing Run

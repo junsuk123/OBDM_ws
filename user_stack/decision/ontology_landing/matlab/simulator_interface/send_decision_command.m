@@ -50,14 +50,26 @@ end
 sim = update_pad_ekf(sim, observation, timestamp, cfg);
 
 if ~should_send_guidance_command(sim, timestamp, cfg)
+    log_trajectory_debug('skip_command_period', sim, uavState, observation, semantic, [], [], timestamp);
     return;
 end
 
 trajectory = generate_ontology_trajectory(sim, classProbability, confidence, cfg, uavState, observation, semantic, timestamp);
+if isfield(trajectory, 'hasMarker') && trajectory.hasMarker
+    [sim, trajectory] = update_direct_land_request(sim, trajectory, uavState, timestamp, cfg);
+end
 sim.guidance.mode = trajectory.mode;
 sim.guidance.trajectory = trajectory;
 
+if isfield(cfg, 'visualization') && isfield(cfg.visualization, 'showOntologyGraph') && cfg.visualization.showOntologyGraph
+    if isfield(trajectory, 'ontologyGraph') && isstruct(trajectory.ontologyGraph) && ...
+            isfield(trajectory.ontologyGraph, 'nodes') && isfield(trajectory.ontologyGraph, 'edges')
+        plotOntologyGraphRealtime(trajectory.ontologyGraph, cfg);
+    end
+end
+
 if strcmpi(trajectory.command, 'land')
+    log_trajectory_debug('land_request', sim, uavState, observation, semantic, trajectory, [0.0, 0.0, 0.0], timestamp);
     if ~sim.guidance.landModeSent
         if run_guidance_command('land', 0, 0, 0, 45, sim, cfg)
             sim.guidance.landModeSent = true;
@@ -68,6 +80,7 @@ else
     localTarget = odom_target_to_local_setpoint(sim.guidance.lastTarget, sim.guidance.odomOrigin, ...
         sim.guidance.odomAltitudeOffset);
     sim.guidance.localTarget = localTarget;
+    log_trajectory_debug('local_wp', sim, uavState, observation, semantic, trajectory, localTarget, timestamp);
     run_guidance_command('local_wp', localTarget(1), localTarget(2), localTarget(3), 25, sim, cfg);
 end
 
@@ -84,13 +97,19 @@ semantic.descentStability = 0.5;
 semantic.dragRisk = 0.5;
 semantic.timeEfficiency = 0.5;
 semantic.energyEfficiency = 0.5;
+semantic.relativeDistanceState = 0.5;
+semantic.altitudeState = 0.5;
+semantic.droneMotionStability = 0.5;
+semantic.roverMotionStability = 0.5;
+semantic.altitudeAbovePad = 0.0;
+semantic.roverSpeed = 0.0;
 semantic.pathLengthEstimate = 0.0;
 semantic.timeToTargetEstimate = 0.0;
 semantic.energyCostEstimate = 0.0;
 semantic.dragForce = 0.0;
 semantic.dragPower = 0.0;
 semantic.relativeAirSpeed = 0.0;
-semantic.vector = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
+semantic.vector = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
 end
 
 function semantic = complete_semantic_state(semantic)
@@ -201,6 +220,7 @@ else
 end
 markerPosition = sim.guidance.padEkf.state(1:3)';
 markerVelocity = sim.guidance.padEkf.state(4:6)';
+touchdownAltitude = pad_touchdown_altitude(markerPosition, cfg);
 uavVelocity = [0.0, 0.0, 0.0];
 if isfield(uavState, 'velocity') && numel(uavState.velocity) >= 3
     uavVelocity = uavState.velocity;
@@ -215,29 +235,22 @@ relVel = markerVelocity(1:2) - uavVelocity(1:2);
 range = norm(rel);
 closingSpeed = max(0.2, -dot(rel, relVel) / max(range, eps));
 
-landingPosterior = classProbability(min(2, numel(classProbability)));
-intent = max(cfg.guidance.ontologyLandingIntentFloor, ...
-    clamp01(landingPosterior * max(0.0, min(1.0, confidence))));
-risk = clamp01(0.30 * semantic.windRisk + 0.25 * semantic.dragRisk + ...
-    0.20 * (1.0 - semantic.energyEfficiency) + 0.15 * (1.0 - semantic.attitudeStability) + ...
-    0.10 * (1.0 - semantic.visualStability));
-trackQuality = clamp01(0.45 * semantic.alignmentState + 0.35 * semantic.visualStability + ...
-    0.20 * semantic.attitudeStability);
-efficiency = clamp01(0.55 * semantic.energyEfficiency + 0.45 * semantic.timeEfficiency);
+ontologyGraph = evaluate_landing_ontology_graph(markerPosition, markerVelocity, uavState, semantic, ...
+    classProbability, confidence, range, closingSpeed, cfg);
+intent = ontologyGraph.values.landingIntent;
+risk = ontologyGraph.values.operationalRisk;
+trackQuality = ontologyGraph.values.trackQuality;
+efficiency = ontologyGraph.values.efficiency;
+leadTime = ontologyGraph.values.leadTime;
+futureTime = ontologyGraph.values.futurePredictionTime;
+futurePoint = ontologyGraph.values.futureMarkerPoint;
+navGain = ontologyGraph.values.navigationGain;
+maxStep = ontologyGraph.values.maxHorizontalStep;
+descentRate = ontologyGraph.values.descentRate;
+descentStartRadius = ontologyGraph.values.descentStartRadius;
 
-leadTimeMax = lerp(cfg.guidance.ontologyMinLeadTime, cfg.guidance.ontologyMaxLeadTime, ...
-    clamp01(trackQuality * efficiency * (1.0 - 0.5 * risk)));
-leadDistanceGain = get_guidance_value(cfg, 'ontologyLeadDistanceGain', 0.0);
-leadTime = min(leadTimeMax, max(cfg.guidance.ontologyMinLeadTime, range / closingSpeed + leadDistanceGain * range));
-leadPoint = markerPosition(1:2) + markerVelocity(1:2) * leadTime;
-
-navGain = lerp(cfg.guidance.ontologyMinNavigationConstant, cfg.guidance.ontologyMaxNavigationConstant, ...
-    clamp01(intent * (0.30 + 0.55 * trackQuality + 0.15 * semantic.timeEfficiency) * ...
-    (1.0 - 0.45 * risk)));
-pnStep = navGain * (leadPoint - uavState.position(1:2));
+pnStep = navGain * (ontologyGraph.values.approachAimPoint - uavState.position(1:2));
 stepNorm = norm(pnStep);
-maxStep = lerp(cfg.guidance.ontologyMinHorizontalStep, cfg.guidance.ontologyMaxHorizontalStep, ...
-    clamp01((0.25 + 0.55 * trackQuality + 0.20 * efficiency) * (1.0 - 0.35 * risk)));
 if stepNorm > maxStep
     pnStep = pnStep / stepNorm * maxStep;
 end
@@ -245,14 +258,9 @@ directStep = marker_closure_step(rel, range, maxStep, cfg);
 pnStep = (1.0 - cfg.guidance.ontologyDistancePriority) * pnStep + ...
     cfg.guidance.ontologyDistancePriority * directStep;
 pnStep = enforce_marker_closure_step(pnStep, rel, range, cfg);
+pnStep = pnStep * get_guidance_value(cfg, 'horizontalResponseScale', 1.0);
 
 targetXY = uavState.position(1:2) + pnStep;
-descentAuthority = clamp01(intent * semantic.alignmentState * semantic.visualStability * ...
-    semantic.attitudeStability * semantic.energyEfficiency * (1.0 - risk));
-descentRate = lerp(cfg.guidance.ontologyMinDescentRate, cfg.guidance.ontologyMaxDescentRate, descentAuthority);
-alignRadius = cfg.guidance.alignRadius * lerp(0.75, 1.25, semantic.alignmentState);
-descentStartRadius = max(alignRadius, cfg.guidance.ontologyDescentStartRadius * ...
-    lerp(0.65, 1.15, trackQuality) * lerp(1.05, 0.70, risk));
 
 descentReferenceAltitude = uavAltitude;
 if isfield(sim.guidance, 'lastTarget') && numel(sim.guidance.lastTarget) >= 3 && ...
@@ -261,21 +269,26 @@ if isfield(sim.guidance, 'lastTarget') && numel(sim.guidance.lastTarget) >= 3 &&
 end
 descentDt = guidance_descent_dt(sim, timestamp, cfg);
 if range <= descentStartRadius
-    targetAltitude = max(cfg.labeling.touchdownAltitude, ...
+    targetAltitude = max(touchdownAltitude, ...
         descentReferenceAltitude - descentRate * descentDt);
 else
     farDescentRate = descentRate * cfg.guidance.ontologyFarDescentRateScale;
-    targetAltitude = max(cfg.labeling.touchdownAltitude, ...
+    targetAltitude = max(touchdownAltitude, ...
         descentReferenceAltitude - farDescentRate * descentDt);
 end
 
 trajectory.mode = 'ONTOLOGY_ARUCO_TRAJECTORY';
 trajectory.target = [targetXY, targetAltitude];
 trajectory.markerWorldPosition = markerPosition;
+trajectory.landingPadCenterWorld = markerPosition;
 trajectory.markerWorldVelocity = markerVelocity;
+trajectory.touchdownAltitude = touchdownAltitude;
 trajectory.descentStartRadius = descentStartRadius;
 trajectory.landingIntent = intent;
 trajectory.leadTime = leadTime;
+trajectory.futurePredictionTime = futureTime;
+trajectory.futureMarkerPoint = futurePoint;
+trajectory.ontologyGraph = ontologyGraph;
 trajectory.navigationGain = navGain;
 trajectory.maxHorizontalStep = maxStep;
 trajectory.approachStep = norm(pnStep);
@@ -291,7 +304,7 @@ trajectory.dragForce = semantic.dragForce;
 trajectory.dragPower = semantic.dragPower;
 trajectory.energyCostEstimate = semantic.energyCostEstimate;
 trajectory.finalLand = range <= cfg.guidance.finalLandRadius && ...
-    uavAltitude <= cfg.guidance.finalLandAltitude && ...
+    uavAltitude <= max(cfg.guidance.finalLandAltitude, touchdownAltitude + 0.2) && ...
     semantic.alignmentState >= cfg.guidance.ontologyFinalLandMinAlignment && ...
     semantic.visualStability >= cfg.guidance.ontologyFinalLandMinVisualStability && ...
     semantic.windRisk <= cfg.guidance.ontologyFinalLandMaxWindRisk && ...
@@ -299,6 +312,59 @@ trajectory.finalLand = range <= cfg.guidance.finalLandRadius && ...
 if trajectory.finalLand
     trajectory.command = 'land';
 end
+end
+
+function [sim, trajectory] = update_direct_land_request(sim, trajectory, uavState, timestamp, cfg)
+directRadius = get_guidance_value(cfg, 'directLandRadius', cfg.guidance.finalLandRadius);
+directAltitudeAbovePad = get_guidance_value(cfg, 'directLandAltitudeAbovePad', 1.20);
+directStableTime = get_guidance_value(cfg, 'directLandStableTime', 0.70);
+maxHorizontalSpeed = get_guidance_value(cfg, 'directLandMaxHorizontalSpeed', 1.20);
+
+uavAltitude = uavState.position(3);
+if isfield(uavState, 'altitude')
+    uavAltitude = uavState.altitude;
+end
+horizontalSpeed = 0.0;
+if isfield(uavState, 'velocity') && numel(uavState.velocity) >= 2
+    horizontalSpeed = norm(uavState.velocity(1:2));
+end
+
+padAltitude = trajectory.touchdownAltitude - get_guidance_value(cfg, 'touchdownHeightAbovePad', 0.0);
+altitudeAbovePad = uavAltitude - padAltitude;
+aligned = trajectory.distanceToMarker <= directRadius;
+lowEnough = altitudeAbovePad <= directAltitudeAbovePad;
+slowEnough = horizontalSpeed <= maxHorizontalSpeed;
+
+if aligned && lowEnough && slowEnough
+    if ~isfield(sim.guidance, 'directLandSince') || isempty(sim.guidance.directLandSince) || ...
+            ~isfinite(sim.guidance.directLandSince)
+        sim.guidance.directLandSince = timestamp;
+    end
+    stableTime = max(0.0, timestamp - sim.guidance.directLandSince);
+else
+    sim.guidance.directLandSince = nan;
+    stableTime = 0.0;
+end
+
+trajectory.directLand = struct( ...
+    'aligned', aligned, ...
+    'lowEnough', lowEnough, ...
+    'slowEnough', slowEnough, ...
+    'stableTime', stableTime, ...
+    'requiredStableTime', directStableTime, ...
+    'altitudeAbovePad', altitudeAbovePad, ...
+    'horizontalSpeed', horizontalSpeed);
+
+if stableTime >= directStableTime
+    trajectory.finalLand = true;
+    trajectory.command = 'land';
+    trajectory.mode = 'DIRECT_STABLE_LAND';
+end
+end
+
+function altitude = pad_touchdown_altitude(markerPosition, cfg)
+heightAbovePad = get_guidance_value(cfg, 'touchdownHeightAbovePad', 0.0);
+altitude = max(cfg.labeling.touchdownAltitude, markerPosition(3) + heightAbovePad);
 end
 
 function dt = guidance_descent_dt(sim, timestamp, cfg)
@@ -315,9 +381,9 @@ holdTarget = get_hold_target(sim, cfg);
 landingPosterior = classProbability(min(2, numel(classProbability)));
 intent = max(cfg.guidance.ontologyLandingIntentFloor, ...
     clamp01(landingPosterior * max(0.0, min(1.0, confidence))));
-risk = clamp01(0.35 * semantic.windRisk + 0.25 * semantic.dragRisk + ...
-    0.20 * (1.0 - semantic.energyEfficiency) + 0.10 * (1.0 - semantic.attitudeStability) + ...
-    0.10 * (1.0 - semantic.visualStability));
+risk = clamp01(0.25 * semantic.windRisk + 0.20 * semantic.dragRisk + ...
+    0.18 * (1.0 - semantic.energyEfficiency) + 0.14 * (1.0 - semantic.droneMotionStability) + ...
+    0.13 * (1.0 - semantic.roverMotionStability) + 0.10 * (1.0 - semantic.visualStability));
 targetAltitude = uavState.position(3);
 if isfield(sim, 'guidance') && isfield(sim.guidance, 'lastTarget') && ~any(isnan(sim.guidance.lastTarget))
     holdTarget = sim.guidance.lastTarget;
@@ -346,8 +412,8 @@ trajectory.leadTime = 0.0;
 trajectory.navigationGain = 0.0;
 trajectory.maxHorizontalStep = 0.0;
 trajectory.descentRate = 0.0;
-trajectory.trackQuality = clamp01(0.45 * semantic.alignmentState + 0.35 * semantic.visualStability + ...
-    0.20 * semantic.attitudeStability);
+trajectory.trackQuality = clamp01(0.30 * semantic.alignmentState + 0.25 * semantic.relativeDistanceState + ...
+    0.25 * semantic.visualStability + 0.20 * semantic.droneMotionStability);
 trajectory.efficiency = clamp01(0.55 * semantic.energyEfficiency + 0.45 * semantic.timeEfficiency);
 trajectory.risk = risk;
 trajectory.pathLengthEstimate = semantic.pathLengthEstimate;
@@ -475,10 +541,103 @@ if isfield(cfg, 'guidance') && isfield(cfg.guidance, fieldName) && ~isempty(cfg.
 end
 end
 
+function log_trajectory_debug(stage, sim, uavState, observation, semantic, trajectory, localTarget, timestamp)
+logPath = '/tmp/obdm_matlab_trajectory_debug.log';
+fid = fopen(logPath, 'a');
+if fid < 0
+    return;
+end
+cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
+
+uavPosition = get_vector_field(uavState, 'position', [nan, nan, nan]);
+uavVelocity = get_vector_field(uavState, 'velocity', [nan, nan, nan]);
+markerPosition = get_vector_field(observation, 'markerPosition', [nan, nan, nan]);
+markerVelocity = get_vector_field(observation, 'markerVelocity', [nan, nan, nan]);
+target = get_vector_field(trajectory, 'target', [nan, nan, nan]);
+if isempty(localTarget)
+    localTarget = [nan, nan, nan];
+end
+
+hasMarker = get_bool_field(trajectory, 'hasMarker', false);
+tagDetected = get_bool_field(observation, 'tagDetected', false);
+isMockUav = get_bool_field(uavState, 'isMock', true);
+isMockObs = get_bool_field(observation, 'isMock', true);
+ekfInitialized = false;
+ekfAge = nan;
+ekfPosition = [nan, nan, nan];
+if isfield(sim, 'guidance') && isfield(sim.guidance, 'padEkf')
+    ekfInitialized = get_bool_field(sim.guidance.padEkf, 'initialized', false);
+    if isfield(sim.guidance.padEkf, 'state') && numel(sim.guidance.padEkf.state) >= 3
+        ekfPosition = sim.guidance.padEkf.state(1:3)';
+    end
+    if isfield(sim.guidance.padEkf, 'lastMeasurementTimestamp')
+        ekfAge = max(0.0, timestamp - sim.guidance.padEkf.lastMeasurementTimestamp);
+    end
+end
+
+mode = get_char_field(trajectory, 'mode', 'none');
+command = get_char_field(trajectory, 'command', 'none');
+source = get_char_field(observation, 'source', 'none');
+range = get_numeric_field(trajectory, 'distanceToMarker', nan);
+approachStep = get_numeric_field(trajectory, 'approachStep', nan);
+maxStep = get_numeric_field(trajectory, 'maxHorizontalStep', nan);
+navGain = get_numeric_field(trajectory, 'navigationGain', nan);
+alignment = get_numeric_field(semantic, 'alignmentState', nan);
+visual = get_numeric_field(semantic, 'visualStability', nan);
+windRisk = get_numeric_field(semantic, 'windRisk', nan);
+
+fprintf(fid, ['t=%.3f stage=%s mode=%s command=%s hasMarker=%d ekfInit=%d ekfAge=%.3f ' ...
+    'tag=%d source=%s uavMock=%d obsMock=%d ' ...
+    'uav=%s uavVel=%s marker=%s markerVel=%s ekf=%s target=%s local=%s ' ...
+    'range=%.3f approachStep=%.3f maxStep=%.3f navGain=%.3f ' ...
+    'alignment=%.3f visual=%.3f windRisk=%.3f\n'], ...
+    timestamp, stage, mode, command, hasMarker, ekfInitialized, ekfAge, ...
+    tagDetected, source, isMockUav, isMockObs, ...
+    format_vector(uavPosition), format_vector(uavVelocity), ...
+    format_vector(markerPosition), format_vector(markerVelocity), ...
+    format_vector(ekfPosition), format_vector(target), format_vector(localTarget), ...
+    range, approachStep, maxStep, navGain, alignment, visual, windRisk);
+end
+
+function value = get_vector_field(item, fieldName, defaultValue)
+value = defaultValue;
+if isstruct(item) && isfield(item, fieldName) && numel(item.(fieldName)) >= numel(defaultValue)
+    candidate = item.(fieldName);
+    value = candidate(1:numel(defaultValue));
+end
+end
+
+function value = get_bool_field(item, fieldName, defaultValue)
+value = defaultValue;
+if isstruct(item) && isfield(item, fieldName) && ~isempty(item.(fieldName))
+    value = logical(item.(fieldName));
+end
+end
+
+function value = get_numeric_field(item, fieldName, defaultValue)
+value = defaultValue;
+if isstruct(item) && isfield(item, fieldName) && ~isempty(item.(fieldName))
+    value = double(item.(fieldName));
+end
+end
+
+function value = get_char_field(item, fieldName, defaultValue)
+value = defaultValue;
+if isstruct(item) && isfield(item, fieldName) && ~isempty(item.(fieldName))
+    value = char(item.(fieldName));
+end
+end
+
+function text = format_vector(value)
+value = double(value(:)');
+text = sprintf('[%.3f,%.3f,%.3f]', value(1), value(2), value(3));
+end
+
 function prefix = clean_env_command_prefix()
 keys = {'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'DISPLAY', ...
     'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', ...
-    'ROS_LOCALHOST_ONLY'};
+    'RMW_IMPLEMENTATION', 'ROS_LOCALHOST_ONLY', 'CYCLONEDDS_URI', ...
+    'FASTRTPS_DEFAULT_PROFILES_FILE'};
 defaults = struct('SHELL', '/bin/bash', 'LANG', 'C.UTF-8');
 parts = {'env -i'};
 for i = 1:numel(keys)
@@ -492,7 +651,9 @@ for i = 1:numel(keys)
     end
 end
 parts{end+1} = 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"';
-parts{end+1} = 'RMW_IMPLEMENTATION="rmw_fastrtps_cpp"';
+if isempty(getenv('RMW_IMPLEMENTATION'))
+    parts{end+1} = 'RMW_IMPLEMENTATION="rmw_fastrtps_cpp"';
+end
 if isempty(getenv('ROS_LOCALHOST_ONLY'))
     parts{end+1} = 'ROS_LOCALHOST_ONLY="0"';
 end

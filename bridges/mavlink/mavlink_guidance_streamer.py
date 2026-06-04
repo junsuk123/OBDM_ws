@@ -183,6 +183,11 @@ class GuidanceStreamer:
                 self.land_sent = True
                 self.node.get_logger().info("LAND mode requested")
                 return
+            if self.land_sent:
+                if str(self.current_mode).upper() != "LAND":
+                    self.mav.set_mode("LAND")
+                    self.node.get_logger().info("LAND mode re-requested", throttle_duration_sec=2.0)
+                return
             if self.target is None:
                 return
             target_age = time.monotonic() - self.target_t

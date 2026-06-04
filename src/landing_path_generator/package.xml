@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>landing_path_generator</name>
+  <version>0.1.0</version>
+  <description>Mode-adaptive landing reference generator.</description>
+  <maintainer email="research@example.com">UAV Landing Research Team</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>landing_interfaces</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

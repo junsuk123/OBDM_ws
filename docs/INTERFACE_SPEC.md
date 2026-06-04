@@ -49,6 +49,7 @@ Current compatibility aliases:
 | `ROS_DOMAIN_ID` | `0` | ROS 2 domain |
 | `ROS_LOCALHOST_ONLY` | `0` | ROS network visibility |
 | `RMW_IMPLEMENTATION` | `rmw_fastrtps_cpp` | ROS middleware |
+| `CYCLONEDDS_URI` | unset unless user-provided | CycloneDDS network profile when using CycloneDDS |
 | `GZ_VERSION` | `harmonic` | Gazebo CLI version |
 | `OBDM_DISABLE_RVIZ` | unset | Disable RViz helper when `1` |
 | `OBDM_ENABLE_MAVLINK_FALLBACK` | unset | Enable direct fallback MAVLink commands when `1` |

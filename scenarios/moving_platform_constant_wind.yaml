@@ -1,0 +1,12 @@
+scenario: moving_platform_constant_wind
+description: Moving rover platform with constant crosswind.
+platform:
+  moving: true
+  speed_mps: 0.4
+wind_profile: constant_crosswind
+marker:
+  temporary_loss: false
+obstacles: []
+expected_decision_modes:
+  - CONSERVATIVE_APPROACH
+  - TRACKING_APPROACH

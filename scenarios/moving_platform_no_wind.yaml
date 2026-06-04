@@ -1,0 +1,12 @@
+scenario: moving_platform_no_wind
+description: Moving rover platform, no wind, no obstacle.
+platform:
+  moving: true
+  speed_mps: 0.3
+wind_profile: none
+marker:
+  temporary_loss: false
+obstacles: []
+expected_decision_modes:
+  - TRACKING_APPROACH
+  - DIRECT_DESCENT

@@ -3,8 +3,8 @@
 
 The node owns the target kinematics used by MATLAB:
   * initial target position is 10 m in front of the first received vehicle odom
-  * target moves back and forth along the initial vehicle-heading axis within +/- range
-  * acceleration is randomized at each boundary bounce and periodically in-flight
+  * target can move along a line, circle, or randomized bounded wander path
+  * speed and acceleration/yaw-rate commands are randomized periodically
   * target state is published as nav_msgs/Odometry
   * Gazebo visual pose is updated through gz transport when enabled
 
@@ -17,6 +17,7 @@ import argparse
 import math
 import os
 import random
+import re
 import subprocess
 import time
 
@@ -26,10 +27,56 @@ from geometry_msgs.msg import PoseStamped, Twist, Vector3Stamped
 from nav_msgs.msg import Odometry
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 def clamp(value, lo, hi):
     return max(lo, min(hi, value))
+
+
+def parse_pose_v_model_pose(text, model_name):
+    needle = f'name: "{model_name}"'
+    index = text.find(needle)
+    if index < 0:
+        return None
+    next_pose = text.find("\npose {", index + len(needle))
+    segment = text[index:] if next_pose < 0 else text[index:next_pose]
+    position = parse_vector_block(segment, "position")
+    orientation = parse_vector_block(segment, "orientation")
+    if position is None:
+        return None
+    if orientation is None:
+        yaw = 0.0
+    else:
+        yaw = quat_to_yaw(
+            orientation.get("x", 0.0),
+            orientation.get("y", 0.0),
+            orientation.get("z", 0.0),
+            orientation.get("w", 1.0),
+        )
+    return (position.get("x", 0.0), position.get("y", 0.0), position.get("z", 0.0), yaw)
+
+
+def parse_vector_block(text, field):
+    match = re.search(rf"\b{re.escape(field)}\s*\{{(?P<body>.*?)\}}", text, re.S)
+    if not match:
+        return None
+    values = {}
+    for axis, value in re.findall(r"\b([xyzw])\s*:\s*([-+0-9.eE]+)", match.group("body")):
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None
+        if not math.isfinite(parsed):
+            return None
+        values[axis] = parsed
+    return values
+
+
+def quat_to_yaw(x, y, z, w):
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 
 class MovingLandingTarget:
@@ -51,8 +98,12 @@ class MovingLandingTarget:
         self.visible_pub = self.node.create_publisher(Bool, args.marker_visible_topic, 10)
         self.touchdown_pub = self.node.create_publisher(Bool, args.touchdown_topic, latched_qos)
         self.touchdown_metrics_pub = self.node.create_publisher(Vector3Stamped, args.touchdown_metrics_topic, latched_qos)
+        self.box_marker_pub = self.node.create_publisher(MarkerArray, args.box_marker_topic, 10)
         # Publish Twist on ROS2 so ros_gz bridge can forward to /model/.../cmd_vel
         self.gz_twist_pub = self.node.create_publisher(Twist, f"/model/{args.model_name}/cmd_vel", 10)
+        self.motion_enable_sub = self.node.create_subscription(
+            Bool, args.motion_enable_topic, self.on_motion_enable, latched_qos
+        )
 
         self.drone = None
         self.initialized = False
@@ -70,13 +121,23 @@ class MovingLandingTarget:
         self.circle_theta = 0.0
         self.circle_omega = 0.0
         self.circle_alpha = 0.0
+        self.random_target_speed = 0.0
+        self.random_target_yaw_rate = 0.0
+        self.random_yaw_rate = 0.0
         self.z = args.marker_z
         self.x = 0.0
         self.y = 0.0
+        self.actual_x = 0.0
+        self.actual_y = 0.0
+        self.actual_z = args.marker_z
+        self.actual_yaw = 0.0
+        self.actual_pose_source = "commanded"
+        self.last_actual_pose_read_t = 0.0
         self.vs = 0.0
         self.accel_s = 0.0
         self.last_t = time.monotonic()
         self.last_accel_change_t = self.last_t
+        self.last_random_change_t = self.last_t
         self.last_gz_t = 0.0
         self.gz_pose_initialized = False
         self.gz_initial_pose_sent = False
@@ -94,7 +155,14 @@ class MovingLandingTarget:
         self.wheel_yawrate_max = float(os.getenv("OBDM_ROVER_YAWRATE_MAX", "1.2"))
         self.start_t = time.monotonic()
         self.takeoff_detected = False
+        self.contact_armed = False
+        self.contact_arming_z_threshold = max(
+            args.contact_arming_z_threshold,
+            args.takeoff_z_threshold,
+            args.touchdown_ground_z_threshold + 0.5,
+        )
         self.motion_enabled = not args.wait_for_takeoff
+        self.motion_release_received = not args.wait_for_motion_enable
         self.touchdown_detected = False
         self.touchdown_metrics = (0.0, 0.0, 0.0)
         self.last_zero_cmd_t = 0.0
@@ -103,11 +171,28 @@ class MovingLandingTarget:
 
         self.node.get_logger().info(
             f"Moving ArUco target publishing {args.marker_odom_topic}; "
-            f"world={args.world}, model={args.model_name}, wait_for_takeoff={args.wait_for_takeoff}"
+            f"world={args.world}, model={args.model_name}, wait_for_takeoff={args.wait_for_takeoff}, "
+            f"wait_for_motion_enable={args.wait_for_motion_enable}, motion_enable_topic={args.motion_enable_topic}"
         )
 
         if args.initial_x is not None and args.initial_y is not None:
             self.initialize_from_pose(args.initial_x, args.initial_y, args.initial_yaw_rad, "configured MATLAB initial position")
+
+    def on_motion_enable(self, msg):
+        if bool(msg.data):
+            if not self.motion_release_received:
+                self.node.get_logger().info(
+                    f"External rover motion release received on {self.args.motion_enable_topic}"
+                )
+            self.motion_release_received = True
+            if self.takeoff_detected or not self.args.wait_for_takeoff:
+                self.enable_motion_if_ready("external release")
+        else:
+            self.node.get_logger().info(
+                f"External rover motion hold received on {self.args.motion_enable_topic}; stopping target motion"
+            )
+            self.motion_release_received = False
+            self.stop_motion()
 
     def on_drone_odom(self, msg):
         p = msg.pose.pose.position
@@ -130,15 +215,34 @@ class MovingLandingTarget:
             self.initialize_from_pose(self.drone["x"], self.drone["y"], yaw, "vehicle odom")
         if (not self.takeoff_detected) and self.drone["z"] >= self.args.takeoff_z_threshold:
             self.mark_takeoff_detected()
+        if (not self.contact_armed) and self.drone["z"] >= self.contact_arming_z_threshold:
+            self.contact_armed = True
+            self.node.get_logger().info(
+                f"Landing contact detection armed "
+                f"(z={self.drone['z']:.2f} >= {self.contact_arming_z_threshold:.2f})"
+            )
         self.check_touchdown()
 
     def mark_takeoff_detected(self):
         self.takeoff_detected = True
+        self.enable_motion_if_ready("takeoff detected")
+
+    def enable_motion_if_ready(self, reason):
+        if self.args.wait_for_takeoff and not self.takeoff_detected:
+            return
+        if self.args.wait_for_motion_enable and not self.motion_release_received:
+            if reason == "takeoff detected":
+                self.node.get_logger().info(
+                    f"Takeoff detected (z={self.drone['z']:.2f} >= {self.args.takeoff_z_threshold:.2f}); "
+                    f"holding target motion until external release on {self.args.motion_enable_topic}"
+                )
+            return
+        if self.motion_enabled:
+            return
         self.motion_enabled = True
         mode = "forward-only mode" if self.args.one_way_on_takeoff else "target motion"
         self.node.get_logger().info(
-            f"Takeoff detected (z={self.drone['z']:.2f} >= {self.args.takeoff_z_threshold:.2f}); "
-            f"enabling {mode}"
+            f"Enabling {mode} after {reason}"
         )
 
     def check_touchdown(self):
@@ -146,21 +250,22 @@ class MovingLandingTarget:
             return
         if not self.takeoff_detected:
             return
-        dx = self.drone["x"] - self.x
-        dy = self.drone["y"] - self.y
+        if not self.contact_armed:
+            return
+        self.update_actual_pose_from_gazebo()
+        dx = self.drone["x"] - self.actual_x
+        dy = self.drone["y"] - self.actual_y
         horizontal_error = math.sqrt(dx * dx + dy * dy)
         altitude_ok = self.drone["z"] <= self.args.touchdown_z_threshold
         position_ok = horizontal_error <= self.args.touchdown_xy_tolerance
         speed_ok = abs(self.drone["vz"]) <= self.args.touchdown_max_abs_vz
-        ground_contact_ok = (
-            self.drone["z"] <= self.args.touchdown_ground_z_threshold
-            and horizontal_error <= self.args.touchdown_ground_xy_tolerance
-        )
+        ground_contact_ok = self.drone["z"] <= self.args.touchdown_ground_z_threshold
         if ground_contact_ok or (altitude_ok and position_ok and speed_ok):
             self.touchdown_detected = True
             self.touchdown_metrics = (self.drone["z"], horizontal_error, self.drone["vz"])
+            contact_kind = "landing pad" if position_ok else "ground"
             self.node.get_logger().info(
-                f"Touchdown on marker detected: z={self.drone['z']:.2f}, "
+                f"{contact_kind} contact detected: z={self.drone['z']:.2f}, "
                 f"xy_error={horizontal_error:.2f}, vz={self.drone['vz']:.2f}, "
                 f"ground_contact={ground_contact_ok}; stopping target motion"
             )
@@ -168,9 +273,13 @@ class MovingLandingTarget:
 
     @staticmethod
     def quat_to_yaw(x, y, z, w):
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        return math.atan2(siny_cosp, cosy_cosp)
+        return quat_to_yaw(x, y, z, w)
+
+    @staticmethod
+    def yaw_to_quat(yaw):
+        qz = math.sin(yaw * 0.5)
+        qw = math.cos(yaw * 0.5)
+        return 0.0, 0.0, qz, qw
 
     def position_from_motion(self):
         if self.args.motion_mode == "circle":
@@ -181,6 +290,8 @@ class MovingLandingTarget:
                 self.center_x + radius * radial_x,
                 self.center_y + radius * radial_y,
             )
+        if self.args.motion_mode == "random":
+            return (self.x, self.y)
         return (
             self.center_x + self.motion_s * self.forward_x,
             self.center_y + self.motion_s * self.forward_y,
@@ -205,10 +316,24 @@ class MovingLandingTarget:
         self.circle_theta = math.radians(self.args.circle_start_deg)
         self.circle_omega = self.args.circle_angular_speed
         self.circle_alpha = 0.0
+        self.random_target_speed = self.rng.uniform(self.args.random_min_speed, self.args.random_max_speed)
+        self.random_target_yaw_rate = self.rng.uniform(-self.args.random_yawrate_max, self.args.random_yawrate_max)
+        self.random_yaw_rate = 0.0
+        self.last_random_change_t = self.last_t
         min_s, max_s = self.motion_limits()
         self.motion_s = clamp(self.motion_s, min_s, max_s)
+        self.x = self.center_x + self.motion_s * self.forward_x
+        self.y = self.center_y + self.motion_s * self.forward_y
         self.x, self.y = self.position_from_motion()
-        self.vs = self.rng.uniform(-self.args.initial_speed, self.args.initial_speed)
+        self.actual_x = self.x
+        self.actual_y = self.y
+        self.actual_z = self.z
+        self.actual_yaw = yaw
+        self.actual_pose_source = "commanded"
+        if self.args.motion_mode == "random":
+            self.vs = self.rng.uniform(self.args.random_min_speed, self.args.random_max_speed)
+        else:
+            self.vs = self.rng.uniform(-self.args.initial_speed, self.args.initial_speed)
         self.accel_s = self.random_accel()
         self.initialized = True
         self.node.get_logger().info(
@@ -253,6 +378,51 @@ class MovingLandingTarget:
         self.yaw = math.atan2(tangent_y, tangent_x)
         self.x, self.y = self.position_from_motion()
 
+    def update_random_motion(self, dt):
+        now = time.monotonic()
+        if self.args.random_change_period > 0.0 and now - self.last_random_change_t > self.args.random_change_period:
+            self.random_target_speed = self.rng.uniform(self.args.random_min_speed, self.args.random_max_speed)
+            self.random_target_yaw_rate = self.rng.uniform(-self.args.random_yawrate_max, self.args.random_yawrate_max)
+            self.last_random_change_t = now
+
+        dx = self.x - self.center_x
+        dy = self.y - self.center_y
+        forward_offset = dx * self.forward_x + dy * self.forward_y
+        lateral_offset = dx * self.lateral_x + dy * self.lateral_y
+        min_s, max_s = self.motion_limits()
+        lateral_limit = max(0.05, self.args.random_lateral_range_m)
+
+        over_forward = forward_offset < min_s or forward_offset > max_s
+        over_lateral = abs(lateral_offset) > lateral_limit
+        if over_forward or over_lateral:
+            desired_heading = math.atan2(self.center_y - self.y, self.center_x - self.x)
+            heading_error = self.wrap_angle(desired_heading - self.yaw)
+            yaw_target = clamp(
+                self.args.random_boundary_yaw_gain * heading_error,
+                -self.args.random_yawrate_max,
+                self.args.random_yawrate_max,
+            )
+        else:
+            yaw_target = self.random_target_yaw_rate
+
+        speed_alpha = clamp(self.args.random_speed_smoothing * dt, 0.0, 1.0)
+        yaw_alpha = clamp(self.args.random_yawrate_smoothing * dt, 0.0, 1.0)
+        self.vs += (self.random_target_speed - self.vs) * speed_alpha
+        self.random_yaw_rate += (yaw_target - self.random_yaw_rate) * yaw_alpha
+        self.vs = clamp(self.vs, 0.0, self.args.random_max_speed)
+        self.random_yaw_rate = clamp(self.random_yaw_rate, -self.args.random_yawrate_max, self.args.random_yawrate_max)
+
+        self.yaw = self.wrap_angle(self.yaw + self.random_yaw_rate * dt)
+        self.x += self.vs * math.cos(self.yaw) * dt
+        self.y += self.vs * math.sin(self.yaw) * dt
+
+        dx = self.x - self.center_x
+        dy = self.y - self.center_y
+        forward_offset = clamp(dx * self.forward_x + dy * self.forward_y, min_s, max_s)
+        lateral_offset = clamp(dx * self.lateral_x + dy * self.lateral_y, -lateral_limit, lateral_limit)
+        self.x = self.center_x + forward_offset * self.forward_x + lateral_offset * self.lateral_x
+        self.y = self.center_y + forward_offset * self.forward_y + lateral_offset * self.lateral_y
+
     def step(self):
         if not self.initialized:
             if time.monotonic() - self.start_t >= self.args.odom_init_timeout_s:
@@ -280,11 +450,13 @@ class MovingLandingTarget:
 
         if self.args.motion_mode == "circle":
             self.update_circle_motion(dt)
+        elif self.args.motion_mode == "random":
+            self.update_random_motion(dt)
         elif now - self.last_accel_change_t > self.args.accel_change_period:
             self.accel_s = self.random_accel()
             self.last_accel_change_t = now
 
-        if self.args.motion_mode != "circle":
+        if self.args.motion_mode not in ("circle", "random"):
             one_way_active = self.args.one_way_on_takeoff and self.takeoff_detected
             min_s, max_s = self.motion_limits()
             if one_way_active:
@@ -322,11 +494,12 @@ class MovingLandingTarget:
             self.last_gz_t = now
 
     def is_visible(self):
+        self.update_actual_pose_from_gazebo()
         if self.drone is None:
             return False
-        dx = self.x - self.drone["x"]
-        dy = self.y - self.drone["y"]
-        dz = self.z - self.drone["z"]
+        dx = self.actual_x - self.drone["x"]
+        dy = self.actual_y - self.drone["y"]
+        dz = self.actual_z - self.drone["z"]
         distance = math.sqrt(dx * dx + dy * dy + dz * dz)
         reference_forward_x = math.cos(self.drone["yaw"])
         reference_forward_y = math.sin(self.drone["yaw"])
@@ -342,16 +515,25 @@ class MovingLandingTarget:
         )
 
     def publish_state(self, visible):
+        self.update_actual_pose_from_gazebo()
         stamp = self.node.get_clock().now().to_msg()
+        if self.actual_pose_source == "gazebo":
+            marker_yaw = self.actual_yaw
+        else:
+            marker_yaw = self.current_motion_yaw()
+        qx, qy, qz, qw = self.yaw_to_quat(marker_yaw)
 
         odom = Odometry()
         odom.header.stamp = stamp
         odom.header.frame_id = "odom"
         odom.child_frame_id = "aruco_landing_marker"
-        odom.pose.pose.position.x = float(self.x)
-        odom.pose.pose.position.y = float(self.y)
-        odom.pose.pose.position.z = float(self.z)
-        odom.pose.pose.orientation.w = 1.0
+        odom.pose.pose.position.x = float(self.actual_x)
+        odom.pose.pose.position.y = float(self.actual_y)
+        odom.pose.pose.position.z = float(self.actual_z)
+        odom.pose.pose.orientation.x = qx
+        odom.pose.pose.orientation.y = qy
+        odom.pose.pose.orientation.z = qz
+        odom.pose.pose.orientation.w = qw
         if self.args.motion_mode == "circle":
             vx = self.args.circle_radius_m * self.circle_omega * (
                 -math.sin(self.circle_theta) * self.forward_x + math.cos(self.circle_theta) * self.lateral_x
@@ -359,6 +541,9 @@ class MovingLandingTarget:
             vy = self.args.circle_radius_m * self.circle_omega * (
                 -math.sin(self.circle_theta) * self.forward_y + math.cos(self.circle_theta) * self.lateral_y
             )
+        elif self.args.motion_mode == "random":
+            vx = self.vs * math.cos(self.yaw)
+            vy = self.vs * math.sin(self.yaw)
         else:
             vx = self.vs * self.forward_x
             vy = self.vs * self.forward_y
@@ -387,6 +572,130 @@ class MovingLandingTarget:
         metrics.vector.y = float(self.touchdown_metrics[1])
         metrics.vector.z = float(self.touchdown_metrics[2])
         self.touchdown_metrics_pub.publish(metrics)
+
+        self.box_marker_pub.publish(self.build_box_markers(stamp, odom.pose.pose.orientation))
+
+    def update_actual_pose_from_gazebo(self):
+        if not self.args.use_gazebo_pose_for_rviz:
+            self.actual_x = self.x
+            self.actual_y = self.y
+            self.actual_z = self.z
+            self.actual_yaw = self.current_motion_yaw()
+            self.actual_pose_source = "commanded"
+            return
+        now = time.monotonic()
+        if now - self.last_actual_pose_read_t < 1.0 / max(self.args.gz_pose_read_rate, 0.1):
+            return
+        self.last_actual_pose_read_t = now
+        pose = self.read_gazebo_model_pose()
+        if pose is None:
+            if self.actual_pose_source != "gazebo":
+                self.actual_x = self.x
+                self.actual_y = self.y
+                self.actual_z = self.z
+                self.actual_yaw = self.current_motion_yaw()
+            return
+        self.actual_x, self.actual_y, model_z, self.actual_yaw = pose
+        self.actual_z = model_z + max(0.0, self.args.marker_z - self.args.model_z)
+        self.actual_pose_source = "gazebo"
+
+    def read_gazebo_model_pose(self):
+        topic = f"/world/{self.args.world}/pose/info"
+        try:
+            result = subprocess.run(
+                [
+                    "timeout",
+                    f"{max(self.args.gz_pose_read_timeout_s, 0.05):.3f}",
+                    "gz",
+                    "topic",
+                    "-e",
+                    "-t",
+                    topic,
+                    "-n",
+                    "1",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=max(0.2, self.args.gz_pose_read_timeout_s + 0.2),
+            )
+        except Exception:
+            return None
+        if result.returncode != 0 or not result.stdout:
+            return None
+        return parse_pose_v_model_pose(result.stdout, self.args.model_name)
+
+    def current_motion_yaw(self):
+        if self.args.motion_mode == "circle":
+            vx = self.args.circle_radius_m * self.circle_omega * (
+                -math.sin(self.circle_theta) * self.forward_x + math.cos(self.circle_theta) * self.lateral_x
+            )
+            vy = self.args.circle_radius_m * self.circle_omega * (
+                -math.sin(self.circle_theta) * self.forward_y + math.cos(self.circle_theta) * self.lateral_y
+            )
+            if math.hypot(vx, vy) > 1e-6:
+                return math.atan2(vy, vx)
+        elif self.args.motion_mode == "random":
+            return self.yaw
+        elif abs(self.vs) > 1e-6:
+            return self.yaw if self.vs >= 0.0 else self.wrap_angle(self.yaw + math.pi)
+        return self.yaw
+
+    @staticmethod
+    def wrap_angle(angle):
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def build_box_markers(self, stamp, orientation):
+        marker_array = MarkerArray()
+        marker_array.markers = [
+            self.make_box_marker(
+                stamp,
+                marker_id=1,
+                ns="landing_target_rover",
+                z=float(self.actual_z - self.args.marker_z + self.args.model_z + 0.5 * self.args.rover_box_height_m),
+                sx=float(self.args.rover_box_length_m),
+                sy=float(self.args.rover_box_width_m),
+                sz=float(self.args.rover_box_height_m),
+                rgba=(0.10, 0.45, 0.95, 0.80),
+                orientation=orientation,
+            ),
+            self.make_box_marker(
+                stamp,
+                marker_id=2,
+                ns="landing_target_pad",
+                z=float(self.actual_z + 0.5 * self.args.landing_pad_box_height_m),
+                sx=float(self.args.landing_pad_box_length_m),
+                sy=float(self.args.landing_pad_box_width_m),
+                sz=float(self.args.landing_pad_box_height_m),
+                rgba=(0.15, 0.90, 0.25, 0.88),
+                orientation=orientation,
+            ),
+        ]
+        return marker_array
+
+    def make_box_marker(self, stamp, marker_id, ns, z, sx, sy, sz, rgba, orientation):
+        marker = Marker()
+        marker.header.stamp = stamp
+        marker.header.frame_id = "odom"
+        marker.ns = ns
+        marker.id = int(marker_id)
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.position.x = float(self.actual_x)
+        marker.pose.position.y = float(self.actual_y)
+        marker.pose.position.z = float(z)
+        marker.pose.orientation = orientation
+        marker.scale.x = max(0.01, sx)
+        marker.scale.y = max(0.01, sy)
+        marker.scale.z = max(0.01, sz)
+        marker.color.r = float(rgba[0])
+        marker.color.g = float(rgba[1])
+        marker.color.b = float(rgba[2])
+        marker.color.a = float(rgba[3])
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+        return marker
 
     def publish_gazebo_motion(self):
         if not self.gz_initial_pose_sent:
@@ -464,6 +773,11 @@ class MovingLandingTarget:
             world_vy = self.args.circle_radius_m * self.circle_omega * (
                 -math.sin(self.circle_theta) * self.forward_y + math.cos(self.circle_theta) * self.lateral_y
             )
+        elif self.args.motion_mode == "random":
+            linear_cmd = max(0.0, self.vs)
+            angular_cmd = self.random_yaw_rate
+            world_vx = self.vs * math.cos(self.yaw)
+            world_vy = self.vs * math.sin(self.yaw)
         else:
             linear_cmd = self.vs
             angular_cmd = 0.0
@@ -568,6 +882,9 @@ def main():
     parser.add_argument("--gz-service-timeout-ms", type=float, default=3000.0)
     parser.add_argument("--gz-topic-timeout-ms", type=float, default=500.0)
     parser.add_argument("--gz-log-period", type=float, default=2.0)
+    parser.add_argument("--use-gazebo-pose-for-rviz", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gz-pose-read-rate", type=float, default=10.0)
+    parser.add_argument("--gz-pose-read-timeout-s", type=float, default=0.18)
     parser.add_argument("--verbose-gz", action="store_true")
     parser.add_argument("--spawn-forward-m", type=float, default=2.5)
     parser.add_argument("--spawn-lateral-m", type=float, default=0.0)
@@ -578,7 +895,7 @@ def main():
     parser.add_argument("--model-z", type=float, default=0.04)
     # Make the target move slower and over a longer path by default so it
     # can physically interact with the vehicle and be interceptable.
-    parser.add_argument("--motion-mode", choices=["line", "circle"], default="line")
+    parser.add_argument("--motion-mode", choices=["line", "circle", "random"], default="line")
     parser.add_argument("--motion-range-m", type=float, default=1.0)
     parser.add_argument("--max-motion-range-m", type=float, default=2.0)
     parser.add_argument("--circle-radius-m", type=float, default=0.6)
@@ -589,6 +906,14 @@ def main():
     parser.add_argument("--circle-angular-accel-max", type=float, default=0.015)
     parser.add_argument("--circle-accel-change-period", type=float, default=3.0)
     parser.add_argument("--circle-speed-gain", type=float, default=0.8)
+    parser.add_argument("--random-min-speed", type=float, default=0.18)
+    parser.add_argument("--random-max-speed", type=float, default=0.42)
+    parser.add_argument("--random-yawrate-max", type=float, default=0.28)
+    parser.add_argument("--random-change-period", type=float, default=2.5)
+    parser.add_argument("--random-lateral-range-m", type=float, default=0.8)
+    parser.add_argument("--random-boundary-yaw-gain", type=float, default=1.6)
+    parser.add_argument("--random-speed-smoothing", type=float, default=1.8)
+    parser.add_argument("--random-yawrate-smoothing", type=float, default=1.4)
     parser.add_argument("--min-forward-offset-m", type=float, default=0.0)
     parser.add_argument("--max-forward-offset-m", type=float, default=2.0)
     parser.add_argument("--initial-speed", type=float, default=0.05)
@@ -613,10 +938,21 @@ def main():
         default=float(os.getenv("OBDM_TAKEOFF_Z_THRESHOLD", "0.8")),
     )
     parser.add_argument(
+        "--contact-arming-z-threshold",
+        type=float,
+        default=float(os.getenv("OBDM_CONTACT_ARMING_Z_THRESHOLD", "1.5")),
+    )
+    parser.add_argument(
         "--wait-for-takeoff",
         action=argparse.BooleanOptionalAction,
         default=os.getenv("OBDM_WAIT_FOR_TAKEOFF_BEFORE_ROVER", "1") != "0",
     )
+    parser.add_argument(
+        "--wait-for-motion-enable",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("OBDM_WAIT_FOR_EXTERNAL_ROVER_RELEASE", "0") == "1",
+    )
+    parser.add_argument("--motion-enable-topic", default="/obdm/start_pad_motion")
     parser.add_argument(
         "--touchdown-z-threshold",
         type=float,
@@ -646,8 +982,15 @@ def main():
     parser.add_argument("--marker-odom-topic", default="/landing_marker/odom")
     parser.add_argument("--marker-pose-topic", default="/landing_marker/pose")
     parser.add_argument("--marker-visible-topic", default="/landing_marker/visible")
+    parser.add_argument("--box-marker-topic", default="/landing_marker/ground_truth/box_markers")
     parser.add_argument("--touchdown-topic", default="/landing_marker/touchdown")
     parser.add_argument("--touchdown-metrics-topic", default="/landing_marker/touchdown_metrics")
+    parser.add_argument("--rover-box-length-m", type=float, default=0.90)
+    parser.add_argument("--rover-box-width-m", type=float, default=0.55)
+    parser.add_argument("--rover-box-height-m", type=float, default=0.18)
+    parser.add_argument("--landing-pad-box-length-m", type=float, default=0.72)
+    parser.add_argument("--landing-pad-box-width-m", type=float, default=0.72)
+    parser.add_argument("--landing-pad-box-height-m", type=float, default=0.035)
     args = parser.parse_args()
 
     ns = args.namespace if args.namespace.startswith("/") else "/" + args.namespace
