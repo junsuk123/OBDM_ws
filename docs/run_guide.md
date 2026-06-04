@@ -44,41 +44,10 @@ ros2 launch uav_sim_bringup landing_stack.launch.py
 ```bash
 ./scripts/check_workspace.sh
 ./scripts/run_sim.sh scenarios/moving_platform_no_wind.yaml
-./scripts/kill_sim.sh hard
+./scripts/kill_sim.sh
 ```
 
 `run_sim.sh` currently prints the recommended command sequence rather than hiding simulator startup inside a new wrapper. This keeps backward compatibility with the existing ArduPilot/Gazebo flow.
-
-## Reset Modes
-
-The previous reset behavior is now named **hard reset**. It kills Gazebo, RViz, ROS bridge/helper nodes, and ArduPilot processes, then lets the next run launch a fresh simulator lifecycle:
-
-```bash
-./scripts/kill_sim.sh hard
-```
-
-Each new MATLAB script execution forces a **hard reset** on the first simulator startup, so stale Gazebo, ROS, RViz, and ArduPilot processes are cleared before the run begins. After that first startup in the same MATLAB process, the default integrated reset is **soft reset**. It resets spawned model state by sending Gazebo `gz.msgs.Pose` requests to `/world/<world_name>/set_pose` for the `iris` drone and `r1_rover`, then checks their poses from `/world/runway/pose/info`. If either model is not back near its configured start pose, the MATLAB launcher automatically falls back to a hard reset. Explicit pose reset is used because this world reports `model_only` reset as unsupported, while `reset: {all: true}` can drop models that were spawned after startup, such as the Iris model from `ros_gz_sim create`.
-
-```bash
-./scripts/kill_sim.sh soft
-```
-
-To force the old behavior for a MATLAB run:
-
-```bash
-export OBDM_RESET_METHOD=hard
-matlab -batch "run('matlab/ontology_landing_framework/main.m')"
-```
-
-The main tuning block also exposes `MAIN_TUNING.resetMethod`, `MAIN_TUNING.softResetRequest`, `MAIN_TUNING.softResetSettleSeconds`, `MAIN_TUNING.softResetPoseSampleTimeoutSeconds`, `MAIN_TUNING.softResetRosCleanupGraceSeconds`, and per-model pose tolerances. `cfg.simulation.forceInitialHardReset=true` keeps the first startup hard-reset behavior enabled. The default world is `runway`; for the helper script you can override it with `OBDM_GAZEBO_WORLD`.
-
-Reset attempts are logged to:
-
-```text
-/tmp/obdm_reset.log
-```
-
-Each row records the method, world, request type, success flag, service timing, pose-check timing, cleanup timing, and a short message. A successful soft reset writes `/tmp/obdm_soft_reset_ready`; the next MATLAB launch reuses the preserved Gazebo world and skips a duplicate pre-launch reset. The launcher starts the Gazebo server separately from `ros2 launch`, so soft reset can terminate ROS/ArduPilot launch processes while leaving Gazebo and the GUI alive.
 
 ## Real-time Graph Visualization
 
@@ -208,17 +177,7 @@ During integrated runs, the Gazebo GUI is launched with:
 simulator/gazebo/iris_follow_gui.config
 ```
 
-This enables the Gazebo `CameraTracking` plugin with `follow_target=iris`, so the 3D view follows the Iris drone model during flight. The MATLAB helper also sends a follow command after startup in case the GUI loads before the model spawns. Set `OBDM_GZ_FOLLOW_CAMERA=0` before launching MATLAB to use the stock Gazebo camera behavior instead.
-
-Startup is gated before takeoff. The landing stack is started first while the rover target continues publishing zero velocity. Takeoff is blocked unless the camera image, camera info, odometry, wind visualization, guidance streamer, trajectory generator, and rover helper startup checks finish. Rover motion is released only after `performTakeoff` sets `sim.takeoff.completed=true`; otherwise `/obdm/start_pad_motion` is not published. Check the sequence and camera-follow diagnostics in:
-
-```text
-/tmp/obdm_startup_sequence.log
-/tmp/obdm_gazebo_follow_camera.log
-/tmp/obdm_aruco_landing_target.log
-```
-
-The rover starts 5 m in front of the drone along the configured reference yaw. With the default yaw this is `r1_rover = (x=5.0, y=0.0, z=0.05)`, which avoids spawning the rover and drone on top of each other.
+This enables the Gazebo `CameraTracking` plugin with `follow_target=/iris`, so the 3D view follows the Iris drone model during flight. The MATLAB helper also sends a follow command after startup in case the GUI loads before the model spawns. Set `OBDM_GZ_FOLLOW_CAMERA=0` before launching MATLAB to use the stock Gazebo camera behavior instead.
 
 `MAIN_TUNING.windDifficulty` scales the generated wind before it is published to Gazebo WindEffects through `/world/<world>/wind`. Use `0.0` for near-calm collection, `1.0` for the configured baseline, and values above `1.0` for harsher wind scenarios.
 
@@ -227,29 +186,7 @@ Touch/contact termination is now split into two cases after takeoff. Contact det
 - Landing-pad contact: treated as a successful landing, immediately requests vehicle disarm, stops pad motion, and cleans up the simulator processes.
 - Ground contact away from the pad: treated as a failed landing, immediately requests vehicle disarm, stops pad motion, and cleans up the simulator processes.
 
-The contact classifier is implemented in:
 
-```text
-user_stack/decision/ontology_landing/matlab/simulator_interface/detect_landing_contact.m
-```
-
-The RViz generated path visualizer now accumulates `/obdm/guidance_setpoint` history by default. For a one-segment view from current UAV position to current target, launch it with `--current-generated-only`.
-
-The RViz visualizer also publishes a live top-down 2D projection image:
-
-```text
-/obdm/topdown_projection_image
-```
-
-In that image, blue is the actual drone path and current drone position, orange is the generated ontology trajectory, green is the landing pad, and magenta is the current guidance target. Add an RViz Image display for `/obdm/topdown_projection_image` if it is not already visible in the loaded RViz config.
-
-The RViz landing target view uses box markers instead of odometry arrows for the rover and landing pad:
-
-```text
-/landing_marker/ground_truth/box_markers
-```
-
-The blue rover body box and green landing-pad box use the actual Gazebo model pose from `/world/runway/pose/info` when available, so RViz follows the physical rover/pad instead of only the commanded target trajectory. If Gazebo pose feedback is unavailable, the marker falls back to the commanded target pose.
 
 ## Domain-neutral Ontology Visualization
 
