@@ -56,6 +56,15 @@ end
 function tf = should_read_marker_measurement(sim, cfg)
 tf = isfield(sim, 'isConnected') && sim.isConnected && ...
     isfield(cfg.simulator, 'useRosMeasurements') && cfg.simulator.useRosMeasurements;
+if ~tf
+    return;
+end
+
+readEvery = 1;
+if isfield(cfg.simulator, 'rosReadEveryNSteps')
+    readEvery = max(1, round(cfg.simulator.rosReadEveryNSteps));
+end
+tf = mod(max(sim.currentStep - 1, 0), readEvery) == 0;
 end
 
 function [observation, sim, ok] = try_read_marker_observation(sim, uavState, windState, cfg)
@@ -71,6 +80,7 @@ end
 markerPosition = [nan, nan, nan];
 markerVelocity = [0.0, 0.0, 0.0];
 markerOk = false;
+cameraMarkerOk = false;
 
 % Prefer camera-confirmed marker odometry, but do not let a transient visible
 % false freeze XY guidance. The ground-truth target odometry is a simulator
@@ -82,6 +92,7 @@ if tagDetected || ~visibleOk
     if velOk
         markerVelocity = markerVelocityRead;
     end
+    cameraMarkerOk = markerOk;
 end
 
 if ~markerOk
@@ -96,7 +107,7 @@ if ~markerOk
 end
 
 if markerOk
-    tagDetected = true;
+    tagDetected = cameraMarkerOk && tagDetected;
 else
     if ~visibleOk
         return;

@@ -8,15 +8,26 @@ if isempty(windVector)
     windVector = cfg.wind.meanVelocity;
 end
 
+action = upper(sim.lastDecision.action);
+
 if should_read_ros_measurement(sim, cfg)
     [rosState, sim, ok] = try_read_ros_odometry(sim, timestamp, windVector, cfg);
     if ok
-        uavState = rosState;
-        return;
+        [implausibleMeasurement, sim] = detect_implausible_ros_state(sim, rosState, timestamp, cfg);
+        if ~implausibleMeasurement
+            [staleMeasurement, sim] = detect_stale_ros_state(sim, rosState, action, cfg);
+            if ~staleMeasurement
+                uavState = rosState;
+                return;
+            end
+            if ~sim.rosStateMonitor.warned
+                fprintf('[simulator_interface] Warning: stale odometry detected during LAND; using fallback motion model.\n');
+                sim.rosStateMonitor.warned = true;
+            end
+        end
     end
 end
 
-action = upper(sim.lastDecision.action);
 if strcmp(action, 'LAND')
     descentRate = cfg.simulator.nominalDescentRate;
 else
@@ -72,6 +83,83 @@ if isfield(cfg.simulator, 'rosReadEveryNSteps')
     readEvery = max(1, round(cfg.simulator.rosReadEveryNSteps));
 end
 tf = mod(max(sim.currentStep - 1, 0), readEvery) == 0;
+end
+
+function [isImplausible, sim] = detect_implausible_ros_state(sim, rosState, timestamp, cfg)
+isImplausible = false;
+
+if ~isfield(sim, 'rosStateMonitor') || isempty(sim.rosStateMonitor)
+    sim.rosStateMonitor = struct('lastPosition', [], 'staleCount', 0, 'warned', false, ...
+        'jumpWarned', false);
+end
+if ~isfield(sim.rosStateMonitor, 'jumpWarned')
+    sim.rosStateMonitor.jumpWarned = false;
+end
+
+lastPosition = sim.rosStateMonitor.lastPosition;
+if isempty(lastPosition) || numel(lastPosition) < 3 || any(~isfinite(lastPosition))
+    sim.rosStateMonitor.lastPosition = rosState.position;
+    return;
+end
+
+lastTimestamp = timestamp - cfg.simulation.dt;
+if isfield(sim, 'truth') && isfield(sim.truth, 'timestamp') && isfinite(sim.truth.timestamp)
+    lastTimestamp = sim.truth.timestamp;
+end
+dt = max(timestamp - lastTimestamp, cfg.simulation.dt);
+delta = rosState.position - lastPosition;
+horizontalJump = norm(delta(1:2));
+verticalJump = abs(delta(3));
+
+maxPositionJump = get_simulator_value(cfg, 'rosMaxPositionJump', 8.0);
+maxHorizontalSpeed = get_simulator_value(cfg, 'rosMaxHorizontalSpeed', 25.0);
+maxVerticalSpeed = get_simulator_value(cfg, 'rosMaxVerticalSpeed', 8.0);
+maxHorizontalJump = max(maxPositionJump, maxHorizontalSpeed * dt);
+maxVerticalJump = max(max(1.5, maxVerticalSpeed * dt), 0.5 * maxPositionJump);
+
+if horizontalJump > maxHorizontalJump || verticalJump > maxVerticalJump
+    isImplausible = true;
+    if ~sim.rosStateMonitor.jumpWarned
+        fprintf(['[simulator_interface] Warning: rejected implausible odometry jump ' ...
+            '(dxy=%.2f m, dz=%.2f m, dt=%.2f s; limits dxy<=%.2f, dz<=%.2f). Using fallback motion model.\n'], ...
+            horizontalJump, verticalJump, dt, maxHorizontalJump, maxVerticalJump);
+        sim.rosStateMonitor.jumpWarned = true;
+    end
+else
+    sim.rosStateMonitor.lastPosition = rosState.position;
+    sim.rosStateMonitor.jumpWarned = false;
+end
+end
+
+function [isStale, sim] = detect_stale_ros_state(sim, rosState, action, cfg)
+isStale = false;
+
+if ~isfield(sim, 'rosStateMonitor') || isempty(sim.rosStateMonitor)
+    sim.rosStateMonitor = struct('lastPosition', rosState.position, 'staleCount', 0, 'warned', false);
+    return;
+end
+
+positionEpsilon = 0.02;
+if isfield(cfg, 'simulator') && isfield(cfg.simulator, 'rosStalePositionEpsilon') && ~isempty(cfg.simulator.rosStalePositionEpsilon)
+    positionEpsilon = cfg.simulator.rosStalePositionEpsilon;
+end
+
+triggerCount = 3;
+if isfield(cfg, 'simulator') && isfield(cfg.simulator, 'rosStaleTriggerCount') && ~isempty(cfg.simulator.rosStaleTriggerCount)
+    triggerCount = max(2, round(cfg.simulator.rosStaleTriggerCount));
+end
+
+positionDelta = norm(rosState.position - sim.rosStateMonitor.lastPosition);
+sim.rosStateMonitor.lastPosition = rosState.position;
+
+if strcmp(action, 'LAND') && positionDelta <= positionEpsilon
+    sim.rosStateMonitor.staleCount = sim.rosStateMonitor.staleCount + 1;
+else
+    sim.rosStateMonitor.staleCount = 0;
+    sim.rosStateMonitor.warned = false;
+end
+
+isStale = sim.rosStateMonitor.staleCount >= triggerCount;
 end
 
 function [uavState, sim, ok] = try_read_ros_odometry(sim, timestamp, windVector, cfg)
@@ -158,6 +246,13 @@ if any(isnan(values))
 end
 vector = values;
 ok = true;
+end
+
+function value = get_simulator_value(cfg, fieldName, defaultValue)
+value = defaultValue;
+if isfield(cfg, 'simulator') && isfield(cfg.simulator, fieldName) && ~isempty(cfg.simulator.(fieldName))
+    value = double(cfg.simulator.(fieldName));
+end
 end
 
 function prefix = clean_env_command_prefix()

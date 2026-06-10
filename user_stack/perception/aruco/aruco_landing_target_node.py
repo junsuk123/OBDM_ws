@@ -3,7 +3,7 @@
 
 The node owns the target kinematics used by MATLAB:
   * initial target position is 10 m in front of the first received vehicle odom
-  * target can move along a line, circle, or randomized bounded wander path
+  * target can move along a line, circle, waypoint route, or randomized bounded wander path
   * speed and acceleration/yaw-rate commands are randomized periodically
   * target state is published as nav_msgs/Odometry
   * Gazebo visual pose is updated through gz transport when enabled
@@ -79,6 +79,25 @@ def quat_to_yaw(x, y, z, w):
     return math.atan2(siny_cosp, cosy_cosp)
 
 
+def parse_waypoints(spec):
+    waypoints = []
+    for item in spec.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        parts = [part.strip() for part in item.split(",")]
+        if len(parts) != 2:
+            raise ValueError(f"Invalid waypoint {item!r}; expected forward,lateral")
+        forward_m = float(parts[0])
+        lateral_m = float(parts[1])
+        if not math.isfinite(forward_m) or not math.isfinite(lateral_m):
+            raise ValueError(f"Invalid waypoint {item!r}; values must be finite")
+        waypoints.append((forward_m, lateral_m))
+    if len(waypoints) < 2:
+        raise ValueError("At least two waypoints are required")
+    return waypoints
+
+
 class MovingLandingTarget:
     def __init__(self, args):
         self.args = args
@@ -121,6 +140,10 @@ class MovingLandingTarget:
         self.circle_theta = 0.0
         self.circle_omega = 0.0
         self.circle_alpha = 0.0
+        self.waypoints_local = parse_waypoints(args.waypoints)
+        self.waypoints_world = []
+        self.waypoint_index = 1
+        self.waypoint_yaw_rate = 0.0
         self.random_target_speed = 0.0
         self.random_target_yaw_rate = 0.0
         self.random_yaw_rate = 0.0
@@ -148,10 +171,10 @@ class MovingLandingTarget:
         self.gz_velocity_failures = 0
         self.last_gz_velocity_log_t = 0.0
         self.gz_velocity_warned = False
-        self.wheel_force_gain = float(os.getenv("OBDM_ROVER_FORCE_GAIN", "1.2"))
+        self.wheel_force_gain = float(os.getenv("OBDM_ROVER_FORCE_GAIN", "2.2"))
         self.wheel_turn_gain = float(os.getenv("OBDM_ROVER_TURN_GAIN", "1.8"))
-        self.wheel_force_max = float(os.getenv("OBDM_ROVER_FORCE_MAX", "3.0"))
-        self.wheel_cmdvel_max = float(os.getenv("OBDM_ROVER_CMDVEL_MAX", "0.5"))
+        self.wheel_force_max = float(os.getenv("OBDM_ROVER_FORCE_MAX", "6.0"))
+        self.wheel_cmdvel_max = float(os.getenv("OBDM_ROVER_CMDVEL_MAX", "1.6"))
         self.wheel_yawrate_max = float(os.getenv("OBDM_ROVER_YAWRATE_MAX", "1.2"))
         self.start_t = time.monotonic()
         self.takeoff_detected = False
@@ -164,10 +187,18 @@ class MovingLandingTarget:
         self.motion_enabled = not args.wait_for_takeoff
         self.motion_release_received = not args.wait_for_motion_enable
         self.touchdown_detected = False
-        self.touchdown_metrics = (0.0, 0.0, 0.0)
+        self.touchdown_metrics = (math.nan, math.nan, math.nan)
+        self.gazebo_contact_samples = 0
         self.last_zero_cmd_t = 0.0
         self.rng = random.Random(args.seed if args.seed >= 0 else None)
         self.timer = self.node.create_timer(1.0 / args.rate, self.step)
+
+        # Optional timer to detect Gazebo readiness and auto-release rover motion
+        self.gz_ready_timer = None
+        self.start_on_gazebo_up = getattr(args, "start_on_gazebo_up", False)
+        if self.start_on_gazebo_up:
+            # check Gazebo readiness at 2 Hz
+            self.gz_ready_timer = self.node.create_timer(0.5, self.check_gazebo_ready)
 
         self.node.get_logger().info(
             f"Moving ArUco target publishing {args.marker_odom_topic}; "
@@ -256,20 +287,80 @@ class MovingLandingTarget:
         dx = self.drone["x"] - self.actual_x
         dy = self.drone["y"] - self.actual_y
         horizontal_error = math.sqrt(dx * dx + dy * dy)
+        gazebo_contact_ok = self.read_gazebo_pad_contact()
+        if gazebo_contact_ok:
+            self.gazebo_contact_samples += 1
+        else:
+            self.gazebo_contact_samples = 0
+        gazebo_contact_confirmed = self.gazebo_contact_samples >= self.args.touchdown_contact_min_samples
         altitude_ok = self.drone["z"] <= self.args.touchdown_z_threshold
         position_ok = horizontal_error <= self.args.touchdown_xy_tolerance
         speed_ok = abs(self.drone["vz"]) <= self.args.touchdown_max_abs_vz
-        ground_contact_ok = self.drone["z"] <= self.args.touchdown_ground_z_threshold
-        if ground_contact_ok or (altitude_ok and position_ok and speed_ok):
+        ground_position_ok = horizontal_error <= self.args.touchdown_ground_xy_tolerance
+        ground_contact_ok = (
+            self.drone["z"] <= self.args.touchdown_ground_z_threshold
+            and ground_position_ok
+        )
+        threshold_pad_contact_ok = (
+            not self.args.touchdown_require_gazebo_contact
+            and altitude_ok
+            and position_ok
+            and speed_ok
+        )
+        detected_contact = gazebo_contact_confirmed or threshold_pad_contact_ok
+        if not self.args.touchdown_require_gazebo_contact:
+            detected_contact = detected_contact or ground_contact_ok
+        if detected_contact:
             self.touchdown_detected = True
             self.touchdown_metrics = (self.drone["z"], horizontal_error, self.drone["vz"])
-            contact_kind = "landing pad" if position_ok else "ground"
+            contact_kind = "landing pad" if gazebo_contact_confirmed or position_ok else "ground"
+            contact_source = "gazebo_contact" if gazebo_contact_confirmed else "threshold"
             self.node.get_logger().info(
                 f"{contact_kind} contact detected: z={self.drone['z']:.2f}, "
                 f"xy_error={horizontal_error:.2f}, vz={self.drone['vz']:.2f}, "
-                f"ground_contact={ground_contact_ok}; stopping target motion"
+                f"gazebo_contact={gazebo_contact_confirmed}, source={contact_source}, "
+                f"ground_contact={ground_contact_ok}, ground_xy_ok={ground_position_ok}; "
+                "stopping target motion"
             )
             self.stop_motion()
+
+    def read_gazebo_pad_contact(self):
+        if not self.args.touchdown_use_gazebo_contact:
+            return False
+        topic = self.args.touchdown_contact_topic
+        try:
+            result = subprocess.run(
+                [
+                    "timeout",
+                    f"{max(self.args.touchdown_contact_read_timeout_s, 0.03):.3f}",
+                    "gz",
+                    "topic",
+                    "-e",
+                    "-t",
+                    topic,
+                    "-n",
+                    "1",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=max(0.1, self.args.touchdown_contact_read_timeout_s + 0.1),
+            )
+        except Exception:
+            return False
+        if result.returncode != 0 or not result.stdout:
+            return False
+        text = result.stdout
+        pad_token = self.args.touchdown_contact_pad_collision
+        vehicle_tokens = [
+            token.strip()
+            for token in self.args.touchdown_contact_vehicle_filter.split(",")
+            if token.strip()
+        ]
+        if pad_token and pad_token not in text:
+            return False
+        return any(token in text for token in vehicle_tokens)
 
     @staticmethod
     def quat_to_yaw(x, y, z, w):
@@ -290,7 +381,7 @@ class MovingLandingTarget:
                 self.center_x + radius * radial_x,
                 self.center_y + radius * radial_y,
             )
-        if self.args.motion_mode == "random":
+        if self.args.motion_mode in ("random", "waypoints"):
             return (self.x, self.y)
         return (
             self.center_x + self.motion_s * self.forward_x,
@@ -316,14 +407,29 @@ class MovingLandingTarget:
         self.circle_theta = math.radians(self.args.circle_start_deg)
         self.circle_omega = self.args.circle_angular_speed
         self.circle_alpha = 0.0
+        self.waypoints_world = [
+            (
+                self.center_x + forward_m * self.forward_x + lateral_m * self.lateral_x,
+                self.center_y + forward_m * self.forward_y + lateral_m * self.lateral_y,
+            )
+            for forward_m, lateral_m in self.waypoints_local
+        ]
+        self.waypoint_index = 1
+        self.waypoint_yaw_rate = 0.0
         self.random_target_speed = self.rng.uniform(self.args.random_min_speed, self.args.random_max_speed)
         self.random_target_yaw_rate = self.rng.uniform(-self.args.random_yawrate_max, self.args.random_yawrate_max)
         self.random_yaw_rate = 0.0
         self.last_random_change_t = self.last_t
         min_s, max_s = self.motion_limits()
         self.motion_s = clamp(self.motion_s, min_s, max_s)
-        self.x = self.center_x + self.motion_s * self.forward_x
-        self.y = self.center_y + self.motion_s * self.forward_y
+        if self.args.motion_mode == "waypoints":
+            self.x, self.y = self.waypoints_world[0]
+            if len(self.waypoints_world) > 1:
+                next_x, next_y = self.waypoints_world[1]
+                self.yaw = math.atan2(next_y - self.y, next_x - self.x)
+        else:
+            self.x = self.center_x + self.motion_s * self.forward_x
+            self.y = self.center_y + self.motion_s * self.forward_y
         self.x, self.y = self.position_from_motion()
         self.actual_x = self.x
         self.actual_y = self.y
@@ -332,6 +438,8 @@ class MovingLandingTarget:
         self.actual_pose_source = "commanded"
         if self.args.motion_mode == "random":
             self.vs = self.rng.uniform(self.args.random_min_speed, self.args.random_max_speed)
+        elif self.args.motion_mode == "waypoints":
+            self.vs = clamp(self.args.waypoint_speed, 0.0, self.args.max_speed)
         else:
             self.vs = self.rng.uniform(-self.args.initial_speed, self.args.initial_speed)
         self.accel_s = self.random_accel()
@@ -423,6 +531,50 @@ class MovingLandingTarget:
         self.x = self.center_x + forward_offset * self.forward_x + lateral_offset * self.lateral_x
         self.y = self.center_y + forward_offset * self.forward_y + lateral_offset * self.lateral_y
 
+    def update_waypoint_motion(self, dt):
+        if len(self.waypoints_world) < 2:
+            self.vs = 0.0
+            self.waypoint_yaw_rate = 0.0
+            return
+
+        target_x, target_y = self.waypoints_world[self.waypoint_index]
+        dx = target_x - self.x
+        dy = target_y - self.y
+        distance = math.hypot(dx, dy)
+        while distance <= self.args.waypoint_reached_radius and len(self.waypoints_world) > 1:
+            if self.waypoint_index >= len(self.waypoints_world) - 1:
+                if self.args.waypoint_loop:
+                    self.waypoint_index = 0
+                else:
+                    self.vs = 0.0
+                    self.waypoint_yaw_rate = 0.0
+                    return
+            else:
+                self.waypoint_index += 1
+            target_x, target_y = self.waypoints_world[self.waypoint_index]
+            dx = target_x - self.x
+            dy = target_y - self.y
+            distance = math.hypot(dx, dy)
+
+        desired_yaw = math.atan2(dy, dx)
+        heading_error = self.wrap_angle(desired_yaw - self.yaw)
+        desired_yaw_rate = clamp(
+            self.args.waypoint_heading_gain * heading_error,
+            -self.args.waypoint_yawrate_max,
+            self.args.waypoint_yawrate_max,
+        )
+        yaw_alpha = clamp(self.args.waypoint_yawrate_smoothing * dt, 0.0, 1.0)
+        self.waypoint_yaw_rate += (desired_yaw_rate - self.waypoint_yaw_rate) * yaw_alpha
+        self.yaw = self.wrap_angle(self.yaw + self.waypoint_yaw_rate * dt)
+
+        turn_slowdown = clamp(1.0 - 0.35 * abs(heading_error), 0.55, 1.0)
+        target_speed = clamp(self.args.waypoint_speed * turn_slowdown, 0.0, self.args.max_speed)
+        speed_alpha = clamp(self.args.waypoint_speed_smoothing * dt, 0.0, 1.0)
+        self.vs += (target_speed - self.vs) * speed_alpha
+        self.vs = clamp(self.vs, 0.0, self.args.max_speed)
+        self.x += self.vs * math.cos(self.yaw) * dt
+        self.y += self.vs * math.sin(self.yaw) * dt
+
     def step(self):
         if not self.initialized:
             if time.monotonic() - self.start_t >= self.args.odom_init_timeout_s:
@@ -452,11 +604,13 @@ class MovingLandingTarget:
             self.update_circle_motion(dt)
         elif self.args.motion_mode == "random":
             self.update_random_motion(dt)
+        elif self.args.motion_mode == "waypoints":
+            self.update_waypoint_motion(dt)
         elif now - self.last_accel_change_t > self.args.accel_change_period:
             self.accel_s = self.random_accel()
             self.last_accel_change_t = now
 
-        if self.args.motion_mode not in ("circle", "random"):
+        if self.args.motion_mode not in ("circle", "random", "waypoints"):
             one_way_active = self.args.one_way_on_takeoff and self.takeoff_detected
             min_s, max_s = self.motion_limits()
             if one_way_active:
@@ -542,6 +696,9 @@ class MovingLandingTarget:
                 -math.sin(self.circle_theta) * self.forward_y + math.cos(self.circle_theta) * self.lateral_y
             )
         elif self.args.motion_mode == "random":
+            vx = self.vs * math.cos(self.yaw)
+            vy = self.vs * math.sin(self.yaw)
+        elif self.args.motion_mode == "waypoints":
             vx = self.vs * math.cos(self.yaw)
             vy = self.vs * math.sin(self.yaw)
         else:
@@ -638,6 +795,8 @@ class MovingLandingTarget:
                 return math.atan2(vy, vx)
         elif self.args.motion_mode == "random":
             return self.yaw
+        elif self.args.motion_mode == "waypoints":
+            return self.yaw
         elif abs(self.vs) > 1e-6:
             return self.yaw if self.vs >= 0.0 else self.wrap_angle(self.yaw + math.pi)
         return self.yaw
@@ -703,6 +862,40 @@ class MovingLandingTarget:
             self.gz_pose_initialized = True
             self.gz_initial_pose_sent = True
         self.publish_gazebo_velocity()
+
+    def check_gazebo_ready(self):
+        # If Gazebo already has an initial pose available for the model, treat
+        # that as the simulator being up and allow rover motion to start.
+        try:
+            pose = self.read_gazebo_model_pose()
+        except Exception:
+            pose = None
+        if pose is not None:
+            # mark that Gazebo provided a pose and release motion if configured
+            if not self.motion_release_received:
+                self.node.get_logger().info("Gazebo is ready: auto-releasing rover motion")
+            self.motion_release_received = True
+            # If configured to start on Gazebo up, bypass takeoff gating and enable motion
+            if getattr(self, 'start_on_gazebo_up', False):
+                if not self.motion_enabled:
+                    mode = "forward-only mode" if self.args.one_way_on_takeoff else "target motion"
+                    self.motion_enabled = True
+                    # Ensure a small non-zero initial speed so Gazebo receives motion commands
+                    try:
+                        min_speed = float(getattr(self.args, 'initial_speed', 0.05))
+                    except Exception:
+                        min_speed = 0.05
+                    self.vs = max(self.vs, min_speed)
+                    self.node.get_logger().info(f"Enabling {mode} after gazebo ready (auto-start); initial_vs={self.vs:.3f}")
+            elif self.takeoff_detected or not self.args.wait_for_takeoff:
+                self.enable_motion_if_ready("gazebo ready")
+            # stop the ready timer
+            if self.gz_ready_timer is not None:
+                try:
+                    self.gz_ready_timer.cancel()
+                except Exception:
+                    pass
+                self.gz_ready_timer = None
 
     def publish_gazebo_pose(self):
         qz = math.sin(self.yaw * 0.5)
@@ -776,6 +969,11 @@ class MovingLandingTarget:
         elif self.args.motion_mode == "random":
             linear_cmd = max(0.0, self.vs)
             angular_cmd = self.random_yaw_rate
+            world_vx = self.vs * math.cos(self.yaw)
+            world_vy = self.vs * math.sin(self.yaw)
+        elif self.args.motion_mode == "waypoints":
+            linear_cmd = max(0.0, self.vs)
+            angular_cmd = self.waypoint_yaw_rate
             world_vx = self.vs * math.cos(self.yaw)
             world_vy = self.vs * math.sin(self.yaw)
         else:
@@ -893,9 +1091,9 @@ def main():
     parser.add_argument("--initial-yaw-rad", type=float, default=0.0)
     parser.add_argument("--marker-z", type=float, default=0.04)
     parser.add_argument("--model-z", type=float, default=0.04)
-    # Make the target move slower and over a longer path by default so it
-    # can physically interact with the vehicle and be interceptable.
-    parser.add_argument("--motion-mode", choices=["line", "circle", "random"], default="line")
+    # Keep the target path bounded so it can physically interact with the
+    # vehicle and remain interceptable.
+    parser.add_argument("--motion-mode", choices=["line", "circle", "random", "waypoints"], default="line")
     parser.add_argument("--motion-range-m", type=float, default=1.0)
     parser.add_argument("--max-motion-range-m", type=float, default=2.0)
     parser.add_argument("--circle-radius-m", type=float, default=0.6)
@@ -914,10 +1112,18 @@ def main():
     parser.add_argument("--random-boundary-yaw-gain", type=float, default=1.6)
     parser.add_argument("--random-speed-smoothing", type=float, default=1.8)
     parser.add_argument("--random-yawrate-smoothing", type=float, default=1.4)
+    parser.add_argument("--waypoints", default="0,0;10,0;18,0.4;26,1.6;42,1.6;50,1.2;58,0;80,0;100,0")
+    parser.add_argument("--waypoint-speed", type=float, default=1.35)
+    parser.add_argument("--waypoint-reached-radius", type=float, default=0.55)
+    parser.add_argument("--waypoint-heading-gain", type=float, default=1.1)
+    parser.add_argument("--waypoint-yawrate-max", type=float, default=0.35)
+    parser.add_argument("--waypoint-speed-smoothing", type=float, default=2.4)
+    parser.add_argument("--waypoint-yawrate-smoothing", type=float, default=2.2)
+    parser.add_argument("--waypoint-loop", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-forward-offset-m", type=float, default=0.0)
     parser.add_argument("--max-forward-offset-m", type=float, default=2.0)
     parser.add_argument("--initial-speed", type=float, default=0.05)
-    parser.add_argument("--max-speed", type=float, default=0.5)
+    parser.add_argument("--max-speed", type=float, default=1.6)
     parser.add_argument("--accel-min", type=float, default=0.05)
     parser.add_argument("--accel-max", type=float, default=0.2)
     parser.add_argument("--accel-change-period", type=float, default=1.5)
@@ -952,31 +1158,65 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=os.getenv("OBDM_WAIT_FOR_EXTERNAL_ROVER_RELEASE", "0") == "1",
     )
+    parser.add_argument(
+        "--start-on-gazebo-up",
+        action="store_true",
+        default=False,
+        help="Automatically release rover motion when Gazebo world/model pose becomes available",
+    )
     parser.add_argument("--motion-enable-topic", default="/obdm/start_pad_motion")
     parser.add_argument(
         "--touchdown-z-threshold",
         type=float,
-        default=float(os.getenv("OBDM_TOUCHDOWN_Z_THRESHOLD", "0.60")),
+        default=float(os.getenv("OBDM_TOUCHDOWN_Z_THRESHOLD", "0.80")),
     )
     parser.add_argument(
         "--touchdown-xy-tolerance",
         type=float,
-        default=float(os.getenv("OBDM_TOUCHDOWN_XY_TOLERANCE", "1.15")),
+        default=float(os.getenv("OBDM_TOUCHDOWN_XY_TOLERANCE", "1.30")),
     )
     parser.add_argument(
         "--touchdown-max-abs-vz",
         type=float,
-        default=float(os.getenv("OBDM_TOUCHDOWN_MAX_ABS_VZ", "2.50")),
+        default=float(os.getenv("OBDM_TOUCHDOWN_MAX_ABS_VZ", "3.00")),
     )
     parser.add_argument(
         "--touchdown-ground-z-threshold",
         type=float,
-        default=float(os.getenv("OBDM_TOUCHDOWN_GROUND_Z_THRESHOLD", "0.85")),
+        default=float(os.getenv("OBDM_TOUCHDOWN_GROUND_Z_THRESHOLD", "1.00")),
     )
     parser.add_argument(
         "--touchdown-ground-xy-tolerance",
         type=float,
-        default=float(os.getenv("OBDM_TOUCHDOWN_GROUND_XY_TOLERANCE", "1.35")),
+        default=float(os.getenv("OBDM_TOUCHDOWN_GROUND_XY_TOLERANCE", "1.55")),
+    )
+    parser.add_argument(
+        "--touchdown-use-gazebo-contact",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("OBDM_TOUCHDOWN_USE_GAZEBO_CONTACT", "1") != "0",
+    )
+    parser.add_argument(
+        "--touchdown-require-gazebo-contact",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("OBDM_TOUCHDOWN_REQUIRE_GAZEBO_CONTACT", "1") != "0",
+    )
+    parser.add_argument("--touchdown-contact-topic", default=os.getenv("OBDM_TOUCHDOWN_CONTACT_TOPIC", "/landing_pad/contact"))
+    parser.add_argument(
+        "--touchdown-contact-pad-collision",
+        default=os.getenv("OBDM_TOUCHDOWN_PAD_COLLISION", "aruco_landing_pad_collision"),
+    )
+    parser.add_argument(
+        "--touchdown-contact-vehicle-filter",
+        default=os.getenv(
+            "OBDM_TOUCHDOWN_VEHICLE_FILTER",
+            "iris,base_collision,front_left_leg_collision,front_right_leg_collision,rear_left_leg_collision,rear_right_leg_collision",
+        ),
+    )
+    parser.add_argument("--touchdown-contact-min-samples", type=int, default=int(os.getenv("OBDM_TOUCHDOWN_CONTACT_MIN_SAMPLES", "3")))
+    parser.add_argument(
+        "--touchdown-contact-read-timeout-s",
+        type=float,
+        default=float(os.getenv("OBDM_TOUCHDOWN_CONTACT_READ_TIMEOUT_S", "0.06")),
     )
     parser.add_argument("--drone-odom-topic", default=None)
     parser.add_argument("--marker-odom-topic", default="/landing_marker/odom")

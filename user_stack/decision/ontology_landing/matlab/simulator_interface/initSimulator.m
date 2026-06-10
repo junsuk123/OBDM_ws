@@ -22,5 +22,14 @@ function sim = initSimulator(cfg)
 sim = init_simulator_interface(cfg);
 projectRoot = fileparts(fileparts(mfilename('fullpath')));
 sim = initialize_landing_simulation(sim, launchCfg, projectRoot);
+% Warm up wind endpoint/service check before takeoff so wind logs do not
+% appear late inside the control loop.
+if isfield(cfg, 'simulator') && isfield(cfg.simulator, 'publishWindToGazebo') && cfg.simulator.publishWindToGazebo
+    try
+        [~, sim] = read_wind_condition(sim, 0.0, cfg.wind.meanVelocity, cfg);
+    catch ME
+        fprintf('[initSimulator] wind endpoint warm-up skipped: %s\n', ME.message);
+    end
+end
 sim.lastKnownState = struct('position', cfg.simulator.initialPosition, 'altitude', cfg.simulator.initialAltitude);
 sim.padModule = [];

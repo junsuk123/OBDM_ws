@@ -28,7 +28,7 @@ MAIN_PIPELINE.pretrainedModelMat = '';
 % ===================== USER TUNING PARAMETERS =====================
 % These values are copied into cfg before any collection/training/validation.
 MAIN_TUNING = struct();
-MAIN_TUNING.dataCollectionRepeats = 10;
+MAIN_TUNING.dataCollectionRepeats = 100;
 MAIN_TUNING.numScenarios = MAIN_TUNING.dataCollectionRepeats; % Backward-compatible alias.
 MAIN_TUNING.resetMethod = 'soft'; % soft: Gazebo world reset + ROS node cleanup; hard: kill Gazebo/RViz/ROS.
 MAIN_TUNING.softResetRequest = 'pose';
@@ -51,13 +51,13 @@ MAIN_TUNING.directLandAltitudeAbovePad = 0.45;
 MAIN_TUNING.directLandStableTime = 0.40;
 MAIN_TUNING.directLandMaxHorizontalSpeed = 2.00;
 MAIN_TUNING.contactArmingAltitude = 1.50;
-MAIN_TUNING.contactMinFlightTime = 3.00;
-MAIN_TUNING.contactMinSamples = 10;
+MAIN_TUNING.contactMinFlightTime = 1.50;
+MAIN_TUNING.contactMinSamples = 5;
 MAIN_TUNING.windDifficulty = 1.4;
 MAIN_TUNING.windMeanVelocity = [3.0, 0.8, 0.0];
-MAIN_TUNING.windGustStd = [1.8, 1.4, 0.4];
+MAIN_TUNING.windGustStd = [1.5, 1.4, 0.4];
 MAIN_TUNING.windMaxSpeed = 7.0;
-MAIN_TUNING.windPublishPeriod = 0.5;
+MAIN_TUNING.windPublishPeriod = 0.1;
 MAIN_TUNING.ontologyLandingIntentFloor = 0.45;
 MAIN_TUNING.ontologyFinalLandMinAlignment = 0.72;
 MAIN_TUNING.ontologyFinalLandMinVisualStability = 0.55;
@@ -270,6 +270,7 @@ for scenarioIdx = 1:cfg.simulation.numScenarios
             contact.time = t;
             scenarioContact = contact;
             touchdownInfo = contact;
+            sim = stopLandingPadMotion(sim);
             if contact.success
                 fprintf('[main] Landing-pad contact detected at t = %.1f s (xy=%.3f, z=%.3f). Immediate DISARM and clean restart.\n', ...
                     t, contact.positionError, contact.altitude);
@@ -277,11 +278,10 @@ for scenarioIdx = 1:cfg.simulation.numScenarios
                 fprintf('[main] Ground contact detected after takeoff at t = %.1f s (xy=%.3f, z=%.3f). Marking landing FAILED and clean restart.\n', ...
                     t, contact.positionError, contact.altitude);
             end
-            disarmOk = run_mavlink_command('disarm', 0, 0, 0, 12, sim, cfg);
+            disarmOk = run_mavlink_command('disarm', 0, 0, 0, 4, sim, cfg);
             if contact.success && ~disarmOk
-                run_mavlink_command('land_disarm', 0, 0, 0, 25, sim, cfg);
+                run_mavlink_command('land_disarm', 0, 0, 0, 6, sim, cfg);
             end
-            sim = stopLandingPadMotion(sim);
             sim = shutdownSimulator(sim);
             break;
         end

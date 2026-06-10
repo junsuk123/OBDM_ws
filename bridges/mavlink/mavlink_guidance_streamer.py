@@ -2,13 +2,20 @@
 """Continuously stream local setpoints from ROS topics to ArduPilot MAVLink."""
 
 import argparse
+import math
 import time
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import AccelStamped, PoseStamped, TwistStamped
 from pymavlink import mavutil
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from std_msgs.msg import Bool
+
+
+def quat_to_yaw(x, y, z, w):
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 
 class GuidanceStreamer:
@@ -16,8 +23,12 @@ class GuidanceStreamer:
         self.args = args
         self.node = rclpy.create_node("obdm_mavlink_guidance_streamer")
         self.target = None
+        self.velocity_target = None
+        self.accel_target = None
         self.filtered_target = None
         self.target_t = 0.0
+        self.velocity_t = 0.0
+        self.accel_t = 0.0
         self.target_descending = False
         self.land_requested = False
         self.land_sent = False
@@ -26,9 +37,17 @@ class GuidanceStreamer:
         self.current_z_up = None
         self.current_mode = ""
         self.armed = None
+        self.target_yaw = 0.0
+        self.previous_filtered_target = None
+        self.previous_filtered_target_t = 0.0
+        self.commanded_vx_north = 0.0
+        self.commanded_vy_east = 0.0
+        self.airborne_seen = False
         self.last_takeoff_request_t = 0.0
         self.mav = None
         self.node.create_subscription(PoseStamped, args.setpoint_topic, self.on_setpoint, 10)
+        self.node.create_subscription(TwistStamped, args.velocity_topic, self.on_velocity, 10)
+        self.node.create_subscription(AccelStamped, args.accel_topic, self.on_accel, 10)
         self.node.create_subscription(Bool, args.land_topic, self.on_land, 10)
         self.timer = self.node.create_timer(1.0 / args.rate, self.step)
 
@@ -39,6 +58,7 @@ class GuidanceStreamer:
             float(msg.pose.position.y),
             float(msg.pose.position.z),
         )
+        self.target_yaw = quat_to_yaw(msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w)
         self.target_descending = (
             previous_target is not None
             and self.target[2] < previous_target[2] - self.args.descent_deadband
@@ -51,6 +71,22 @@ class GuidanceStreamer:
                 f"setpoint LOCAL_NED north={self.target[0]:.2f}, east={self.target[1]:.2f}, z_up={self.target[2]:.2f}"
             )
             self.last_log_t = now
+
+    def on_velocity(self, msg):
+        self.velocity_target = (
+            float(msg.twist.linear.x),
+            float(msg.twist.linear.y),
+            float(msg.twist.linear.z),
+        )
+        self.velocity_t = time.monotonic()
+
+    def on_accel(self, msg):
+        self.accel_target = (
+            float(msg.accel.linear.x),
+            float(msg.accel.linear.y),
+            float(msg.accel.linear.z),
+        )
+        self.accel_t = time.monotonic()
 
     def on_land(self, msg):
         self.land_requested = bool(msg.data)
@@ -188,6 +224,19 @@ class GuidanceStreamer:
                     self.mav.set_mode("LAND")
                     self.node.get_logger().info("LAND mode re-requested", throttle_duration_sec=2.0)
                 return
+            airborne = self.current_z_up is not None and self.current_z_up >= self.args.airborne_activation_altitude
+            if airborne:
+                self.airborne_seen = True
+            if not airborne and not self.airborne_seen:
+                now = time.monotonic()
+                if now - self.last_log_t > 2.0:
+                    current = float("nan") if self.current_z_up is None else self.current_z_up
+                    self.node.get_logger().info(
+                        f"waiting for airborne before streaming: current_z_up={current:.2f}, "
+                        f"threshold={self.args.airborne_activation_altitude:.2f}, mode={self.current_mode}"
+                    )
+                    self.last_log_t = now
+                return
             if self.target is None:
                 return
             target_age = time.monotonic() - self.target_t
@@ -201,6 +250,8 @@ class GuidanceStreamer:
             if target_age > self.args.target_timeout and not self.args.hold_last_target:
                 return
             self.ensure_guided()
+            if self.args.control_mode == "velocity_accel" and self.stream_velocity_accel_setpoint(target_age):
+                return
             if self.filtered_target is None:
                 self.filtered_target = self.target
             else:
@@ -212,7 +263,33 @@ class GuidanceStreamer:
                     self.filtered_target[2] + z_alpha * (self.target[2] - self.filtered_target[2]),
                 )
             north, east, z_up = self.filtered_target
+            now = time.monotonic()
+            vx_north = 0.0
+            vy_east = 0.0
+            if self.previous_filtered_target is not None and self.args.max_xy_speed > 0.0:
+                dt = max(1.0e-3, now - self.previous_filtered_target_t)
+                raw_vx = (north - self.previous_filtered_target[0]) / dt
+                raw_vy = (east - self.previous_filtered_target[1]) / dt
+                raw_speed = math.hypot(raw_vx, raw_vy)
+                if raw_speed > 1.0e-6:
+                    commanded_speed = min(raw_speed, self.args.max_xy_speed)
+                    vx_north = raw_vx / raw_speed * commanded_speed
+                    vy_east = raw_vy / raw_speed * commanded_speed
+                    if self.args.max_xy_accel > 0.0:
+                        max_dv = self.args.max_xy_accel * dt
+                        dvx = vx_north - self.commanded_vx_north
+                        dvy = vy_east - self.commanded_vy_east
+                        dv = math.hypot(dvx, dvy)
+                        if dv > max_dv > 0.0:
+                            vx_north = self.commanded_vx_north + dvx / dv * max_dv
+                            vy_east = self.commanded_vy_east + dvy / dv * max_dv
+            self.commanded_vx_north = vx_north
+            self.commanded_vy_east = vy_east
+            self.previous_filtered_target = self.filtered_target
+            self.previous_filtered_target_t = now
             commanded_z_up = z_up
+            if self.args.max_guidance_altitude > 0.0 and commanded_z_up > self.args.max_guidance_altitude:
+                commanded_z_up = self.args.max_guidance_altitude
             climb_limited = False
             vz_down = 0.0
             if self.current_z_up is None:
@@ -234,14 +311,16 @@ class GuidanceStreamer:
                 vz_down = min(self.args.max_descent_rate, max(self.args.min_descent_rate, 0.6 * error))
             z_down = -commanded_z_up
             type_mask = (
-                mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
-                | mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
-                | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
                 | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
                 | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
-                | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
                 | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
             )
+            if self.args.max_xy_speed <= 0.0:
+                type_mask |= (
+                    mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE
+                    | mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE
+                )
             self.mav.mav.set_position_target_local_ned_send(
                 int(time.time() * 1000) & 0xFFFFFFFF,
                 self.mav.target_system,
@@ -251,23 +330,24 @@ class GuidanceStreamer:
                 north,
                 east,
                 z_down,
-                0,
-                0,
+                vx_north,
+                vy_east,
                 vz_down,
                 0,
                 0,
                 0,
-                0,
+                self.target_yaw,
                 0,
             )
-            now = time.monotonic()
             if now - self.last_stream_log_t > 2.0:
                 current = float("nan") if self.current_z_up is None else self.current_z_up
                 self.node.get_logger().info(
                     f"stream target LOCAL_NED north={north:.2f}, east={east:.2f}, "
                     f"raw_z_up={self.target[2]:.2f}, filtered_z_up={z_up:.2f}, "
                     f"cmd_z_up={commanded_z_up:.2f}, z_down={z_down:.2f}, "
-                    f"current_z_up={current:.2f}, vz_down={vz_down:.2f}, climb_limited={climb_limited}, "
+                    f"current_z_up={current:.2f}, vx_north={vx_north:.2f}, vy_east={vy_east:.2f}, "
+                    f"vz_down={vz_down:.2f}, climb_limited={climb_limited}, "
+                    f"yaw={self.target_yaw:.2f}, "
                     f"target_age={target_age:.2f}, mode={self.current_mode}"
                 )
                 self.last_stream_log_t = now
@@ -275,15 +355,111 @@ class GuidanceStreamer:
             self.node.get_logger().warn(f"MAVLink guidance stream error: {exc}")
             self.mav = None
 
+    def stream_velocity_accel_setpoint(self, target_age):
+        now = time.monotonic()
+        if self.velocity_target is None:
+            return False
+        velocity_age = now - self.velocity_t
+        if velocity_age > self.args.velocity_timeout:
+            self.node.get_logger().warn(
+                f"velocity guidance stale age={velocity_age:.2f}s; falling back to position setpoint",
+                throttle_duration_sec=2.0,
+            )
+            return False
+
+        vn, ve, vz_up = self.velocity_target
+        speed = math.hypot(vn, ve)
+        if self.args.max_xy_speed > 0.0 and speed > self.args.max_xy_speed:
+            scale = self.args.max_xy_speed / speed
+            vn *= scale
+            ve *= scale
+        if self.args.max_xy_accel > 0.0:
+            dt = max(1.0e-3, now - self.previous_filtered_target_t) if self.previous_filtered_target_t > 0.0 else 1.0 / self.args.rate
+            max_dv = self.args.max_xy_accel * dt
+            dvn = vn - self.commanded_vx_north
+            dve = ve - self.commanded_vy_east
+            dv = math.hypot(dvn, dve)
+            if dv > max_dv > 0.0:
+                vn = self.commanded_vx_north + dvn / dv * max_dv
+                ve = self.commanded_vy_east + dve / dv * max_dv
+        self.commanded_vx_north = vn
+        self.commanded_vy_east = ve
+        self.previous_filtered_target_t = now
+
+        if (
+            self.args.max_guidance_altitude > 0.0
+            and self.current_z_up is not None
+            and self.current_z_up >= self.args.max_guidance_altitude
+            and vz_up > 0.0
+        ):
+            vz_up = 0.0
+
+        accel_fresh = (
+            self.accel_target is not None
+            and (now - self.accel_t) <= self.args.accel_timeout
+        )
+        an = ae = az_up = 0.0
+        type_mask = (
+            mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE
+            | mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+        )
+        if accel_fresh:
+            an, ae, az_up = self.accel_target
+        else:
+            type_mask |= (
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE
+                | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE
+                | mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE
+            )
+
+        self.mav.mav.set_position_target_local_ned_send(
+            int(time.time() * 1000) & 0xFFFFFFFF,
+            self.mav.target_system,
+            self.mav.target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            type_mask,
+            0,
+            0,
+            0,
+            vn,
+            ve,
+            -vz_up,
+            an,
+            ae,
+            -az_up,
+            self.target_yaw,
+            0,
+        )
+        if now - self.last_stream_log_t > 2.0:
+            current = float("nan") if self.current_z_up is None else self.current_z_up
+            accel_age = float("nan") if self.accel_target is None else now - self.accel_t
+            self.node.get_logger().info(
+                f"stream velocity_accel LOCAL_NED vn={vn:.2f}, ve={ve:.2f}, vz_up={vz_up:.2f}, "
+                f"an={an:.2f}, ae={ae:.2f}, az_up={az_up:.2f}, accel_fresh={accel_fresh}, "
+                f"current_z_up={current:.2f}, velocity_age={velocity_age:.2f}, accel_age={accel_age:.2f}, "
+                f"target_age={target_age:.2f}, mode={self.current_mode}"
+            )
+            self.last_stream_log_t = now
+        return True
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--setpoint-topic", default="/obdm/guidance_setpoint")
+    parser.add_argument("--velocity-topic", default="/obdm/guidance_velocity")
+    parser.add_argument("--accel-topic", default="/obdm/guidance_accel")
     parser.add_argument("--land-topic", default="/obdm/guidance_land")
+    parser.add_argument("--control-mode", choices=("position", "velocity_accel"), default="position")
     parser.add_argument("--rate", type=float, default=10.0)
     parser.add_argument("--target-timeout", type=float, default=2.0)
+    parser.add_argument("--velocity-timeout", type=float, default=1.0)
+    parser.add_argument("--accel-timeout", type=float, default=1.0)
     parser.add_argument("--tracking-alpha", type=float, default=0.25)
     parser.add_argument("--z-tracking-alpha", type=float, default=0.85)
+    parser.add_argument("--max-xy-speed", type=float, default=0.0)
+    parser.add_argument("--max-xy-accel", type=float, default=0.0)
     parser.add_argument("--hold-last-target", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--descent-rate", type=float, default=0.35)
     parser.add_argument("--min-descent-rate", type=float, default=0.10)
@@ -297,7 +473,9 @@ def main():
     parser.add_argument("--auto-takeoff-max-altitude", type=float, default=0.8)
     parser.add_argument("--auto-takeoff-min-altitude", type=float, default=2.0)
     parser.add_argument("--auto-takeoff-target-altitude", type=float, default=5.0)
+    parser.add_argument("--max-guidance-altitude", type=float, default=0.0)
     parser.add_argument("--takeoff-request-period", type=float, default=5.0)
+    parser.add_argument("--airborne-activation-altitude", type=float, default=1.0)
     parser.add_argument(
         "--uris",
         default="udpin:127.0.0.1:14550,udpin:127.0.0.1:14551,tcp:127.0.0.1:5760",
@@ -314,7 +492,6 @@ def main():
         streamer.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()

@@ -136,7 +136,8 @@ classdef ArucoLandingControlModule < handle
                 p.Results.prediction_lead_s, ...
                 p.Results.landing_close_m);
             if ~tracked
-                fprintf('[ArucoLandingControlModule] visual servo tracking timeout; landing best-effort\n');
+                fprintf('[ArucoLandingControlModule] visual servo tracking timeout; holding current guidance, no forced LAND without final marker lock\n');
+                return;
             end
 
             obj.run_mavlink('land', '', p.Results.landing_timeout_s);
@@ -339,7 +340,7 @@ classdef ArucoLandingControlModule < handle
                 obj.poll_odom(0.1);
                 obj.poll_marker(0.1);
                 obj.poll_servo_error(0.02);
-                if ~isempty(obj.marker)
+                if obj.has_recent_marker(1.0)
                     target_xy = obj.predicted_marker_xy(prediction_lead_s);
                     if obj.marker_samples > last_sample_count
                         last_sample_count = obj.marker_samples;
@@ -381,6 +382,11 @@ classdef ArucoLandingControlModule < handle
                 end
                 pause(interval_s);
             end
+        end
+
+        function recent = has_recent_marker(obj, max_age_s)
+            recent = ~isempty(obj.marker) && isfinite(obj.marker_time_s) && ...
+                obj.elapsed_s() - obj.marker_time_s <= max_age_s;
         end
 
         function target_xy = predicted_marker_xy(obj, lead_s)

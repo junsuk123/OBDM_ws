@@ -259,6 +259,8 @@ pnStep = (1.0 - cfg.guidance.ontologyDistancePriority) * pnStep + ...
     cfg.guidance.ontologyDistancePriority * directStep;
 pnStep = enforce_marker_closure_step(pnStep, rel, range, cfg);
 pnStep = pnStep * get_guidance_value(cfg, 'horizontalResponseScale', 1.0);
+pnStep = clamp_step_norm(pnStep, min(maxStep, cfg.guidance.ontologyMaxHorizontalStep));
+pnStep = precision_landing_step(pnStep, rel, range, uavVelocity, markerVelocity, cfg);
 
 targetXY = uavState.position(1:2) + pnStep;
 
@@ -268,6 +270,10 @@ if isfield(sim.guidance, 'lastTarget') && numel(sim.guidance.lastTarget) >= 3 &&
     descentReferenceAltitude = min(uavAltitude, sim.guidance.lastTarget(3));
 end
 descentDt = guidance_descent_dt(sim, timestamp, cfg);
+horizontalSpeed = norm(uavVelocity(1:2));
+relativeSpeed = norm(uavVelocity(1:2) - markerVelocity(1:2));
+[descentRate, targetHoldAltitude, precisionReady] = precision_descent_gate( ...
+    descentRate, touchdownAltitude, markerPosition, uavAltitude, range, horizontalSpeed, relativeSpeed, cfg);
 if range <= descentStartRadius
     targetAltitude = max(touchdownAltitude, ...
         descentReferenceAltitude - descentRate * descentDt);
@@ -276,6 +282,7 @@ else
     targetAltitude = max(touchdownAltitude, ...
         descentReferenceAltitude - farDescentRate * descentDt);
 end
+targetAltitude = max(targetAltitude, targetHoldAltitude);
 
 trajectory.mode = 'ONTOLOGY_ARUCO_TRAJECTORY';
 trajectory.target = [targetXY, targetAltitude];
@@ -295,6 +302,9 @@ trajectory.approachStep = norm(pnStep);
 trajectory.distanceToMarker = range;
 trajectory.descentRate = descentRate;
 trajectory.trackQuality = trackQuality;
+trajectory.precisionReady = precisionReady;
+trajectory.horizontalSpeed = horizontalSpeed;
+trajectory.relativeSpeed = relativeSpeed;
 trajectory.efficiency = efficiency;
 trajectory.risk = risk;
 trajectory.pathLengthEstimate = norm([trajectory.target(1:2) - uavState.position(1:2), ...
@@ -305,6 +315,7 @@ trajectory.dragPower = semantic.dragPower;
 trajectory.energyCostEstimate = semantic.energyCostEstimate;
 trajectory.finalLand = range <= cfg.guidance.finalLandRadius && ...
     uavAltitude <= max(cfg.guidance.finalLandAltitude, touchdownAltitude + 0.2) && ...
+    precisionReady && ...
     semantic.alignmentState >= cfg.guidance.ontologyFinalLandMinAlignment && ...
     semantic.visualStability >= cfg.guidance.ontologyFinalLandMinVisualStability && ...
     semantic.windRisk <= cfg.guidance.ontologyFinalLandMaxWindRisk && ...
@@ -319,6 +330,10 @@ directRadius = get_guidance_value(cfg, 'directLandRadius', cfg.guidance.finalLan
 directAltitudeAbovePad = get_guidance_value(cfg, 'directLandAltitudeAbovePad', 1.20);
 directStableTime = get_guidance_value(cfg, 'directLandStableTime', 0.70);
 maxHorizontalSpeed = get_guidance_value(cfg, 'directLandMaxHorizontalSpeed', 1.20);
+maxRelativeSpeed = get_guidance_value(cfg, 'directLandMaxRelativeSpeed', maxHorizontalSpeed);
+requireRawTag = logical(get_guidance_value(cfg, 'directLandRequireRawTag', true));
+maxEkfAge = get_guidance_value(cfg, 'directLandMaxEkfAge', 0.60);
+minTrackQuality = get_guidance_value(cfg, 'directLandMinTrackQuality', 0.65);
 
 uavAltitude = uavState.position(3);
 if isfield(uavState, 'altitude')
@@ -328,14 +343,31 @@ horizontalSpeed = 0.0;
 if isfield(uavState, 'velocity') && numel(uavState.velocity) >= 2
     horizontalSpeed = norm(uavState.velocity(1:2));
 end
+relativeSpeed = horizontalSpeed;
+if isfield(trajectory, 'markerWorldVelocity') && numel(trajectory.markerWorldVelocity) >= 2 && ...
+        isfield(uavState, 'velocity') && numel(uavState.velocity) >= 2
+    relativeSpeed = norm(uavState.velocity(1:2) - trajectory.markerWorldVelocity(1:2));
+end
 
 padAltitude = trajectory.touchdownAltitude - get_guidance_value(cfg, 'touchdownHeightAbovePad', 0.0);
 altitudeAbovePad = uavAltitude - padAltitude;
 aligned = trajectory.distanceToMarker <= directRadius;
 lowEnough = altitudeAbovePad <= directAltitudeAbovePad;
 slowEnough = horizontalSpeed <= maxHorizontalSpeed;
+relativeSlowEnough = relativeSpeed <= maxRelativeSpeed;
+rawTagDetected = isfield(trajectory, 'rawTagDetected') && logical(trajectory.rawTagDetected);
+padEkfAge = inf;
+if isfield(trajectory, 'padEkfAge') && isnumeric(trajectory.padEkfAge) && isscalar(trajectory.padEkfAge)
+    padEkfAge = trajectory.padEkfAge;
+end
+trackQuality = 0.0;
+if isfield(trajectory, 'trackQuality') && isnumeric(trajectory.trackQuality) && isscalar(trajectory.trackQuality)
+    trackQuality = trajectory.trackQuality;
+end
+freshMarker = isfinite(padEkfAge) && padEkfAge <= maxEkfAge && (~requireRawTag || rawTagDetected);
+trackReady = isfinite(trackQuality) && trackQuality >= minTrackQuality;
 
-if aligned && lowEnough && slowEnough
+if aligned && lowEnough && slowEnough && relativeSlowEnough && freshMarker && trackReady
     if ~isfield(sim.guidance, 'directLandSince') || isempty(sim.guidance.directLandSince) || ...
             ~isfinite(sim.guidance.directLandSince)
         sim.guidance.directLandSince = timestamp;
@@ -350,10 +382,19 @@ trajectory.directLand = struct( ...
     'aligned', aligned, ...
     'lowEnough', lowEnough, ...
     'slowEnough', slowEnough, ...
+    'relativeSlowEnough', relativeSlowEnough, ...
     'stableTime', stableTime, ...
     'requiredStableTime', directStableTime, ...
     'altitudeAbovePad', altitudeAbovePad, ...
-    'horizontalSpeed', horizontalSpeed);
+    'horizontalSpeed', horizontalSpeed, ...
+    'relativeSpeed', relativeSpeed, ...
+    'freshMarker', freshMarker, ...
+    'trackReady', trackReady, ...
+    'rawTagDetected', rawTagDetected, ...
+    'padEkfAge', padEkfAge, ...
+    'maxEkfAge', maxEkfAge, ...
+    'trackQuality', trackQuality, ...
+    'minTrackQuality', minTrackQuality);
 
 if stableTime >= directStableTime
     trajectory.finalLand = true;
@@ -389,6 +430,8 @@ if isfield(sim, 'guidance') && isfield(sim.guidance, 'lastTarget') && ~any(isnan
     holdTarget = sim.guidance.lastTarget;
 end
 searchAltitude = get_guidance_value(cfg, 'searchAltitude', cfg.simulator.takeoffAltitude);
+maxSearchAltitude = get_guidance_value(cfg, 'maxSearchAltitude', cfg.simulator.takeoffAltitude);
+searchAltitude = min(searchAltitude, maxSearchAltitude);
 climbRate = get_guidance_value(cfg, 'markerLostClimbRate', 0.6);
 if targetAltitude < searchAltitude
     timestamp = sim.truth.timestamp;
@@ -524,6 +567,70 @@ if dot(step, direction) <= 0.0
 end
 end
 
+function step = precision_landing_step(step, rel, range, uavVelocity, markerVelocity, cfg)
+precisionRadius = get_guidance_value(cfg, 'precisionApproachRadius', cfg.guidance.ontologyDescentStartRadius);
+finalRadius = get_guidance_value(cfg, 'precisionFinalAlignmentRadius', cfg.guidance.finalLandRadius);
+if range > precisionRadius || range <= eps
+    return;
+end
+
+precisionBlend = clamp01(1.0 - (range - finalRadius) / max(precisionRadius - finalRadius, eps));
+direction = rel ./ max(range, eps);
+closingComponent = dot(step, direction);
+lateral = step - closingComponent * direction;
+
+maxStep = lerp( ...
+    get_guidance_value(cfg, 'precisionMaxHorizontalStep', 0.85), ...
+    get_guidance_value(cfg, 'precisionFinalMaxHorizontalStep', 0.22), ...
+    precisionBlend);
+minClosing = min( ...
+    get_guidance_value(cfg, 'precisionMinApproachStep', 0.03), ...
+    range);
+
+relativeVelocity = uavVelocity(1:2) - markerVelocity(1:2);
+brakeStep = -relativeVelocity * get_guidance_value(cfg, 'commandBrakeTime', 0.35);
+brakeClosing = dot(brakeStep, direction);
+if brakeClosing > 0.0
+    closingComponent = min(closingComponent, brakeClosing);
+end
+closingComponent = max(minClosing, min(closingComponent, range));
+lateral = lateral * (1.0 - 0.75 * precisionBlend);
+step = closingComponent * direction + lateral;
+step = clamp_step_norm(step, maxStep);
+if dot(step, direction) <= 0.0
+    step = min(range, maxStep) * direction;
+end
+end
+
+function [descentRate, holdAltitude, precisionReady] = precision_descent_gate(descentRate, touchdownAltitude, markerPosition, uavAltitude, range, horizontalSpeed, relativeSpeed, cfg)
+precisionRadius = get_guidance_value(cfg, 'precisionApproachRadius', cfg.guidance.ontologyDescentStartRadius);
+alignmentRadius = get_guidance_value(cfg, 'precisionAlignmentRadius', cfg.guidance.alignRadius);
+maxHorizontalSpeed = get_guidance_value(cfg, 'precisionMaxHorizontalSpeedForDescent', 0.70);
+maxRelativeSpeed = get_guidance_value(cfg, 'precisionMaxRelativeSpeedForDescent', 0.45);
+holdHeightAbovePad = get_guidance_value(cfg, 'precisionDescentHoldHeightAbovePad', 0.70);
+
+aligned = range <= alignmentRadius;
+slow = horizontalSpeed <= maxHorizontalSpeed && relativeSpeed <= maxRelativeSpeed;
+precisionReady = aligned && slow;
+holdAltitude = touchdownAltitude;
+
+if range <= precisionRadius
+    precisionBlend = clamp01(1.0 - range / max(precisionRadius, eps));
+    descentRate = min(descentRate, lerp( ...
+        get_guidance_value(cfg, 'precisionMaxDescentRate', 0.35), ...
+        get_guidance_value(cfg, 'precisionFinalDescentRate', 0.18), ...
+        precisionBlend));
+    if ~precisionReady
+        descentRate = descentRate * 0.25;
+        holdAltitude = max(touchdownAltitude, markerPosition(3) + holdHeightAbovePad);
+    end
+end
+
+if uavAltitude <= holdAltitude + 0.05 && ~precisionReady
+    descentRate = 0.0;
+end
+end
+
 function step = marker_closure_step(rel, range, maxStep, cfg)
 if range <= eps
     step = [0.0, 0.0];
@@ -532,6 +639,16 @@ end
 direction = rel ./ range;
 desiredStep = min(maxStep, range);
 step = desiredStep * direction;
+end
+
+function step = clamp_step_norm(step, maxNorm)
+if ~isfinite(maxNorm) || maxNorm <= 0.0
+    return;
+end
+stepNorm = norm(step);
+if stepNorm > maxNorm
+    step = step ./ max(stepNorm, eps) .* maxNorm;
+end
 end
 
 function value = get_guidance_value(cfg, fieldName, defaultValue)

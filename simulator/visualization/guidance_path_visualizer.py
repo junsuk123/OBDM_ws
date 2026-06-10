@@ -123,6 +123,8 @@ class GuidancePathVisualizer:
                 float(pose.pose.position.z),
             )
         elif self.should_append(self.last_generated, pose.pose.position):
+            if self.should_reset_generated_path(pose.pose.position):
+                self.generated_path.poses = []
             self.generated_path.poses.append(pose)
             self.generated_path.poses = self.generated_path.poses[-self.args.max_generated_points :]
             self.last_generated = (
@@ -139,6 +141,14 @@ class GuidancePathVisualizer:
         dy = float(position.y) - last[1]
         dz = float(position.z) - last[2]
         return math.sqrt(dx * dx + dy * dy + dz * dz) >= self.args.min_point_spacing
+
+    def should_reset_generated_path(self, position):
+        if self.last_generated is None or self.args.max_generated_jump <= 0.0:
+            return False
+        dx = float(position.x) - self.last_generated[0]
+        dy = float(position.y) - self.last_generated[1]
+        dz = float(position.z) - self.last_generated[2]
+        return math.sqrt(dx * dx + dy * dy + dz * dz) > self.args.max_generated_jump
 
     def publish_path(self, publisher, path):
         path.header.stamp = self.node.get_clock().now().to_msg()
@@ -341,6 +351,7 @@ def main():
     parser.add_argument("--max-generated-points", type=int, default=24)
     parser.add_argument("--max-actual-points", type=int, default=160)
     parser.add_argument("--min-point-spacing", type=float, default=0.03)
+    parser.add_argument("--max-generated-jump", type=float, default=2.5)
     parser.add_argument("--current-generated-only", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--topdown-width", type=int, default=640)
     parser.add_argument("--topdown-height", type=int, default=640)

@@ -36,12 +36,12 @@ class RoverCmdVelBridge:
         rclpy.init()
         self.node = rclpy.create_node('rover_cmd_vel_to_wheels')
         self.sub = self.node.create_subscription(Twist, '/model/r1_rover/cmd_vel', self.cb, 10)
-        self.force_gain = float(os.getenv('OBDM_ROVER_FORCE_GAIN', '1.2'))
+        self.force_gain = float(os.getenv('OBDM_ROVER_FORCE_GAIN', '2.2'))
         self.turn_gain = float(os.getenv('OBDM_ROVER_TURN_GAIN', '1.8'))
         # Maximum absolute force to apply per wheel (clamps output)
-        self.force_max = float(os.getenv('OBDM_ROVER_FORCE_MAX', '3.0'))
+        self.force_max = float(os.getenv('OBDM_ROVER_FORCE_MAX', '6.0'))
         # Maximum accepted cmd_vel linear.x (m/s) to avoid excessive commanded speeds
-        self.cmdvel_max = float(os.getenv('OBDM_ROVER_CMDVEL_MAX', '0.5'))
+        self.cmdvel_max = float(os.getenv('OBDM_ROVER_CMDVEL_MAX', '1.6'))
         self.yawrate_max = float(os.getenv('OBDM_ROVER_YAWRATE_MAX', '1.2'))
         # wheel joint topics in gz
         self.wheels = [

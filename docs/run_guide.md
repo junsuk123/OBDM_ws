@@ -49,6 +49,19 @@ ros2 launch uav_sim_bringup landing_stack.launch.py
 
 `run_sim.sh` currently prints the recommended command sequence rather than hiding simulator startup inside a new wrapper. This keeps backward compatibility with the existing ArduPilot/Gazebo flow.
 
+## Soft Reset Failures
+
+Soft reset can fail in two places. First, the Gazebo reset service itself can fail or return an unexpected response. Second, the reset can succeed but the post-reset pose check can still fail if the models have not settled or the pose sample does not arrive in time.
+
+The most common causes are:
+
+missing or slow `/world/<world>/pose/info` samples during reset verification
+model position drift larger than the configured tolerance after reset
+Gazebo service timeout or control service failure
+startup load that makes the pose settle window too short for the current machine
+
+When this happens, the code falls back from soft reset to hard reset automatically. Check `/tmp/obdm_reset.log` for the exact `serviceOk`, `poseOk`, and failure message values. If the log says `No Gazebo pose sample`, increase the pose sample timeout or settle time; if it says a model distance exceeds tolerance, increase the reset tolerance or verify that the world is actually returning the model to the expected coordinates.
+
 ## Real-time Graph Visualization
 
 To inspect live node-to-topic relationships during a running stack, use the runtime ROS graph viewer:
@@ -81,6 +94,16 @@ export OBDM_ENABLE_REALTIME_TRAJECTORY_GENERATOR=0
 ```
 
 When trajectory generation is healthy, `/tmp/obdm_realtime_ontology_trajectory_generator.log` should contain `setpoint#... local_ned=(north,east,z)` lines with nonzero XY values and an `ontology=mode:...,intent:...,risk:...,track:...,step:...,descent:...` suffix. The mode should progress from `INTERCEPT` to `PAD_CAPTURE` and then `FINAL_DESCENT`; near the pad, `lead_time` should be close to `0.12` s and `step` should be small rather than staying at the global maximum.
+
+The realtime trajectory generator predicts future rover pad motion only during intercept/capture, then shifts to damped pad-center landing during final descent. During final approach it reasons over marker position/velocity, UAV velocity/acceleration, altitude above pad, descent rate, relative distance, relative speed, and wind from `/iris/wind_world`. The terminal controller estimates touchdown-time pad and UAV positions, compensates for inertia and wind drift with a bounded correction, and uses that predicted touchdown error for center readiness. Close to the pad, the final aim point is constrained inside a small pad-center corridor so prediction and inertia compensation cannot create a lateral "magnetic push" around the landing pad. The integrated run commands the UAV through `/obdm/guidance_velocity` and `/obdm/guidance_accel`; `/obdm/guidance_setpoint` remains available for RViz/debugging and as a fallback. The ontology now also reasons about overshoot risk from relative distance, relative velocity, measured UAV acceleration, wind, drag, track quality, and provider confidence, then adapts velocity gain, damping, max speed, acceleration gain, acceleration damping, and max acceleration before each command is published. Relative distance and relative velocity also act directly inside the command equation: close high-relative-speed states increase damping, reduce desired command speed, and add braking acceleration opposite the drone-to-pad relative velocity. During far intercept, relative velocity no longer suppresses speed by itself; distance authority keeps the UAV fast enough to catch the rover. The command also adds a center-crossing velocity so the UAV can move through the landing-pad center instead of merely matching pad speed; the command speed floor is at least the moving pad speed plus crossing margin, and this crossing term fades when center and relative-speed readiness are satisfied for touchdown. This follows the same control split described by ArduPilot's ROS 2 interface: velocity control is separate from the high-level waypoint goal interface. The log line includes `intercept_lead`, `descent_center_time`, `center_error`, `rel_speed`, `aim_corridor`, `terminal_t`, `inertia_t`, `wind`, `cmd_vel`, `cmd_acc`, `cmd_limits`, `center_ready`, and `rel_ready`; safe center landing should drive `center_error`, `rel_speed`, `rel_dist_risk`, `rel_vel_risk`, and `overshoot` down before the mode reaches `LAND_READY`.
+
+If the camera marker is lost during search/recovery and is not reacquired for 60 seconds, the realtime trajectory generator publishes `/obdm/guidance_land` to request LAND instead of searching indefinitely. The timeout resets whenever a usable camera marker is seen again, and the log reports `marker search timeout ... requesting LAND` when it fires.
+
+When the camera cannot observe the marker, the realtime trajectory generator switches the landing-pad position provider from camera odometry to a noisy abstract rover-GPS estimate from `/landing_marker/ground_truth/odom`. This fallback is labeled `marker_source=rover_gps` in `/tmp/obdm_realtime_ontology_trajectory_generator.log`, uses configurable position/velocity noise, and lets the UAV keep tracking the moving charging pad until the camera marker is visible again. Camera detections remain primary and immediately replace the rover-GPS estimate when they return.
+
+The moving-pad scenario models a charging/maintenance pad mounted on a road vehicle. The rover follows a car-like route: it drives mostly straight down the road, makes smooth lane changes, returns to the original lane, and does not loop back toward the start. The integrated MATLAB launch passes `--no-waypoint-loop` and a long waypoint route so the rover behaves like normal road traffic during the landing attempt.
+
+The UAV guidance is tuned to be faster than the rover during intercept, but the mission objective is pad capture and touchdown, not continuous rover tracking. The MAVLink streamer sends XY velocity commands up to `1.8 m/s` with acceleration limiting, while the realtime trajectory generator uses faster intercept lead/step settings and then tightens to smooth current pad-center velocity and adaptive acceleration control for final descent. In `PAD_CAPTURE` and `FINAL_DESCENT`, `aim_corridor=(offset/limit)` in the generator log shows whether the controller is clipping an over-predicted aim point back toward the pad center. If the marker drops out while the drone is already close and low, the system commits to LAND instead of climbing back into search.
 
 ## MATLAB End-to-End Research Pipeline
 
@@ -169,7 +192,7 @@ Each repeat performs a full simulator lifecycle. Gazebo, RViz, rover/pad helpers
 
 `main.m` starts with `close all force`, so every new execution clears plots from the previous run before generating new result figures. With `MAIN_TUNING.visualizationVisible=true`, the saved result plots are also opened as MATLAB figure windows at the end of the run.
 
-Touchdown/contact detection is delayed until both `MAIN_TUNING.contactMinFlightTime` and `MAIN_TUNING.contactMinSamples` are satisfied. This prevents stale Gazebo/ROS touchdown data from stopping a run at `t=0`, which would leave plots with only one sample.
+Touchdown/contact detection is delayed until both `MAIN_TUNING.contactMinFlightTime` and `MAIN_TUNING.contactMinSamples` are satisfied. The defaults are shorter and more permissive so the system can recognize a valid touchdown earlier and stop the vehicle sooner after pad contact, while still avoiding stale Gazebo/ROS touchdown data at `t=0`.
 
 During integrated runs, the Gazebo GUI is launched with:
 
@@ -179,9 +202,11 @@ simulator/gazebo/iris_follow_gui.config
 
 This enables the Gazebo `CameraTracking` plugin with `follow_target=/iris`, so the 3D view follows the Iris drone model during flight. The MATLAB helper also sends a follow command after startup in case the GUI loads before the model spawns. Set `OBDM_GZ_FOLLOW_CAMERA=0` before launching MATLAB to use the stock Gazebo camera behavior instead.
 
+Marker-search altitude is capped at the initial takeoff altitude. This prevents marker-loss recovery from climbing above the camera's useful ArUco resolution range. The realtime trajectory generator logs both the requested search altitude and the applied ceiling at startup; the MAVLink streamer also clamps outgoing guidance setpoints to the takeoff altitude.
+
 `MAIN_TUNING.windDifficulty` scales the generated wind before it is published to Gazebo WindEffects through `/world/<world>/wind`. Use `0.0` for near-calm collection, `1.0` for the configured baseline, and values above `1.0` for harsher wind scenarios.
 
-Touch/contact termination is now split into two cases after takeoff. Contact detection is armed only after the UAV has climbed above `MAIN_TUNING.contactArmingAltitude`, which prevents the normal initial climb from being misclassified as ground contact.
+Touch/contact termination is now split into two cases after takeoff. Contact detection is armed only after the UAV has climbed above `MAIN_TUNING.contactArmingAltitude`, which prevents the normal initial climb from being misclassified as ground contact. Successful landing-pad touchdown is gated by the Gazebo contact sensor on the rover pad collision (`/landing_pad/contact`) and published through `/landing_marker/touchdown`; altitude/XY thresholds are kept as a ground-contact failure fallback. Set `OBDM_ALLOW_TOUCHDOWN_THRESHOLD_FALLBACK=1` only when you explicitly want to allow the old pad-threshold success behavior without Gazebo contact.
 
 - Landing-pad contact: treated as a successful landing, immediately requests vehicle disarm, stops pad motion, and cleans up the simulator processes.
 - Ground contact away from the pad: treated as a failed landing, immediately requests vehicle disarm, stops pad motion, and cleans up the simulator processes.

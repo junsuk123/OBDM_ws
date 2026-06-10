@@ -129,6 +129,7 @@ try
     airspeed_bridge_pid = '';
     virtual_wind_pid = '';
     wind_visualizer_pid = '';
+    landing_completed_by_controller = false;
     world_name = getenv('OBDM_WORLD_NAME');
     if isempty(world_name)
         world_name = 'runway';
@@ -325,6 +326,7 @@ try
                         'landing_timeout_s', 45);
                     flight_log = controller.get_flight_log();
                     if success
+                        landing_completed_by_controller = true;
                         fprintf('\n✓ ArUco landing mission completed successfully\n');
                         if ~isempty(flight_log) && isfield(flight_log, 'time_s') && ~isempty(flight_log.time_s)
                             if exist('data_logger', 'var') && ~isempty(data_logger)
@@ -334,6 +336,7 @@ try
                         end
                     else
                         fprintf('\n✗ ArUco landing mission failed to complete (success=false)\n');
+                        ProcessManager.mark_soft_reset_unhealthy();
                     end
                 else
                     controller = CircleControlModule('namespace', ns, 'verbose', true);
@@ -348,10 +351,17 @@ try
                     waypoints_local = controller.get_last_waypoints_local();
                     if success && ~isempty(flight_log) && isfield(flight_log, 'time_s') && ~isempty(flight_log.time_s)
                         plot_control_trajectory(flight_log, waypoints_local, ns);
+                    elseif ~success
+                        ProcessManager.mark_soft_reset_unhealthy();
                     end
                 end
                 
                 controller.cleanup();
+                if landing_completed_by_controller && exist('target_mod', 'var') && ~isempty(target_mod)
+                    target_mod.cleanup();
+                    target_mod = [];
+                    fprintf('[integrated_main] Landing guidance stack stopped after successful touchdown\n');
+                end
             catch ME
                 fprintf('\n╔════════════════════════════════════╗\n');
                 fprintf('║ CONTROL TEST FAILED WITH EXCEPTION ║\n');
@@ -361,6 +371,7 @@ try
                 fprintf('  File: %s\n', ME.stack(1).file);
                 fprintf('  Line: %d\n', ME.stack(1).line);
                 fprintf('\nFlight control aborted. Attempting cleanup...\n');
+                ProcessManager.mark_soft_reset_unhealthy();
                 try
                     controller.cleanup();
                 catch
@@ -390,7 +401,9 @@ try
     
     %% 4. 완료
     % Ensure vehicle is landed at the end of the control test only.
-    if exist('control_test_ran', 'var') && control_test_ran
+    if exist('landing_completed_by_controller', 'var') && landing_completed_by_controller
+        fprintf('\n[integrated_main] Final landing skipped; controller already completed landing\n');
+    elseif exist('control_test_ran', 'var') && control_test_ran
         try
             fprintf('\n[integrated_main] Attempting final landing (best-effort)\n');
             perform_landing(ns);

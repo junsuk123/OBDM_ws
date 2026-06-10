@@ -47,8 +47,8 @@ if [[ "$MODE" == "soft" ]]; then
   start_ms="$(date +%s%3N)"
   : > /tmp/obdm_kill_sim_soft_reset_service.log
   for req in \
-    'name: "iris", position: {x: 0, y: 0, z: 0.2}, orientation: {w: 1}' \
-    'name: "r1_rover", position: {x: 5.0, y: 0, z: 0.05}, orientation: {w: 1}'
+    'name: "iris", position: {x: 0, y: 0, z: 0.2}, orientation: {z: 0.7071067811865475, w: 0.7071067811865476}' \
+    'name: "r1_rover", position: {x: 0, y: 5.0, z: 0.05}, orientation: {z: 0.7071067811865475, w: 0.7071067811865476}'
   do
     gz service -s "/world/${WORLD}/set_pose" \
       --reqtype gz.msgs.Pose \

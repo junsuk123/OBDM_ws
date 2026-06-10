@@ -46,6 +46,7 @@ if isfield(sim, 'windEndpointChecked') && sim.windEndpointChecked
     return;
 end
 sim.windEndpointChecked = true;
+sim.windEndpointAvailable = false;
 
 worldName = 'runway';
 if isfield(cfg.simulator, 'gazeboWorldName') && ~isempty(cfg.simulator.gazeboWorldName)
@@ -58,10 +59,11 @@ end
 
 cmd = sprintf(['bash -lc ''export GZ_VERSION=%s; ' ...
     'timeout 2 gz service -s /world/%s/wind_info --reqtype gz.msgs.Empty ' ...
-    '--reptype gz.msgs.Wind --timeout 1500 --req "" >/dev/null 2>&1'''], ...
+    '--reptype gz.msgs.Wind --timeout 700 --req "" >/dev/null 2>&1'''], ...
     gzVersion, worldName);
 [status, ~] = system(cmd);
 if status == 0
+    sim.windEndpointAvailable = true;
     fprintf('[simulator_interface] Gazebo WindEffects/wind_info endpoint is available for world "%s".\n', worldName);
 else
     fprintf('[simulator_interface] Warning: Gazebo wind_info endpoint did not respond for world "%s"; wind topic publish will still be attempted.\n', worldName);

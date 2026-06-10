@@ -37,11 +37,18 @@ end
 
 append_startup_log('takeoff_request_begin', sprintf('namespace=%s altitude=%.2f', ns, sim.takeoff.requestedAltitude));
 if run_mavlink_command('arm_takeoff', sim.takeoff.requestedAltitude, 0, 0, 45, sim, cfg)
-    pause(max(0.5, sim.takeoff.hoverDuration));
+    pause(min(0.5, max(0.1, sim.takeoff.hoverDuration)));
     sim.takeoff.completed = true;
     append_startup_log('takeoff_hover_complete', sprintf('namespace=%s hover_s=%.2f', ns, sim.takeoff.hoverDuration));
     fprintf('[simulator_interface] takeoff command accepted for %s (altitude %.2f m)\n', ns, sim.takeoff.requestedAltitude);
 else
+    if takeoff_airborne_by_odometry(ns, sim.takeoff.requestedAltitude)
+        pause(min(0.5, max(0.1, sim.takeoff.hoverDuration)));
+        sim.takeoff.completed = true;
+        append_startup_log('takeoff_hover_complete_odometry_fallback', sprintf('namespace=%s hover_s=%.2f', ns, sim.takeoff.hoverDuration));
+        fprintf('[simulator_interface] takeoff command accepted for %s via odometry fallback (altitude %.2f m)\n', ns, sim.takeoff.requestedAltitude);
+        return;
+    end
     append_startup_log('takeoff_request_failed', sprintf('namespace=%s altitude=%.2f', ns, sim.takeoff.requestedAltitude));
     fprintf('[simulator_interface] takeoff command failed for %s\n', ns);
 end
@@ -69,6 +76,31 @@ for attempt = 1:12
     end
     fprintf('  %s not ready yet (%d/12)\n', odomTopic, attempt);
     pause(1.5);
+end
+end
+
+function airborne = takeoff_airborne_by_odometry(ns, requestedAltitude)
+airborne = false;
+
+odomTopic = sprintf('%s/odometry', ns);
+minAltitude = max(0.8, requestedAltitude * 0.08);
+cmd = sprintf(['timeout 4 bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
+    'export ROS_DOMAIN_ID=0; timeout 2 ros2 topic echo --no-daemon --spin-time 0.4 ' ...
+    '--qos-reliability best_effort --once --field "pose.pose.position.z" "%s" nav_msgs/msg/Odometry 2>/dev/null'''], ...
+    odomTopic);
+[status, output] = system(cmd);
+if status ~= 0 || isempty(strtrim(output))
+    return;
+end
+
+altitude = str2double(strtrim(output));
+if isnan(altitude)
+    return;
+end
+
+airborne = altitude >= minAltitude;
+if ~airborne && altitude <= -minAltitude
+    airborne = true;
 end
 end
 

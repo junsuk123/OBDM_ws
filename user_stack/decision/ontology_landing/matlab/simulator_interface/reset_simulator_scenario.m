@@ -7,6 +7,8 @@ sim.previousWind = cfg.wind.meanVelocity;
 sim.lastDecision = struct('action', 'HOVER', 'confidence', 0.0, 'probability', [1.0, 0.0]);
 sim.guidance = struct('lastCommandTimestamp', -inf, 'landModeSent', false, ...
     'lastTarget', [nan, nan, nan], 'mode', 'HOVER');
+sim.rosStateMonitor = struct('lastPosition', [], 'staleCount', 0, 'warned', false, ...
+    'jumpWarned', false);
 
 rng(cfg.simulation.seed + scenarioIndex, 'twister');
 

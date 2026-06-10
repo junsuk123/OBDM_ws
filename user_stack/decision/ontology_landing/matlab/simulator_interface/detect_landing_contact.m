@@ -27,6 +27,11 @@ touchdownAltitude = get_labeling_value(cfg, 'touchdownAltitude', cfg.labeling.sa
 padPositionError = get_labeling_value(cfg, 'touchdownPositionError', cfg.labeling.safePositionError);
 groundAltitude = get_labeling_value(cfg, 'touchdownGroundAltitude', touchdownAltitude);
 maxAbsVz = get_labeling_value(cfg, 'touchdownMaxAbsVz', cfg.labeling.safeVerticalSpeed);
+allowPadThresholdFallback = get_labeling_value(cfg, 'allowTouchdownThresholdFallback', false);
+if ~allowPadThresholdFallback
+    fallbackEnv = getenv('OBDM_ALLOW_TOUCHDOWN_THRESHOLD_FALLBACK');
+    allowPadThresholdFallback = strcmpi(strtrim(fallbackEnv), '1') || strcmpi(strtrim(fallbackEnv), 'true');
+end
 
 padContact = contact.altitude <= touchdownAltitude && ...
     contact.positionError <= padPositionError && ...
@@ -43,7 +48,7 @@ if touchdownTopic
         contact.success = false;
     end
     contact.source = 'touchdown_topic';
-elseif padContact
+elseif allowPadThresholdFallback && padContact
     contact.detected = true;
     contact.type = 'pad';
     contact.success = true;

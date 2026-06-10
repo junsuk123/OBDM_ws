@@ -20,19 +20,65 @@ leadDistanceGain = get_guidance_value(cfg, 'ontologyLeadDistanceGain', 0.0);
 leadTime = min(leadTimeMax, max(cfg.guidance.ontologyMinLeadTime, range / max(closingSpeed, eps) + leadDistanceGain * range));
 [aimPoint, futureTime, futurePoint, leadPoint] = predicted_approach_point(markerPosition, markerVelocity, leadTime, cfg);
 
+precisionRadius = get_guidance_value(cfg, 'precisionApproachRadius', cfg.guidance.ontologyDescentStartRadius);
+finalAlignmentRadius = get_guidance_value(cfg, 'precisionFinalAlignmentRadius', cfg.guidance.finalLandRadius);
+precisionBlend = clamp01(1.0 - (range - finalAlignmentRadius) / max(precisionRadius - finalAlignmentRadius, eps));
+if precisionBlend > 0.0
+    precisionLeadTime = lerp( ...
+        get_guidance_value(cfg, 'precisionLeadTime', 0.35), ...
+        get_guidance_value(cfg, 'precisionFinalLeadTime', 0.08), ...
+        precisionBlend);
+    precisionFutureBlend = lerp( ...
+        get_guidance_value(cfg, 'precisionFuturePointBlend', 0.20), ...
+        0.0, ...
+        precisionBlend);
+    [precisionAim, precisionFutureTime, precisionFuturePoint, precisionLeadPoint] = ...
+        predicted_approach_point_with_blend(markerPosition, markerVelocity, precisionLeadTime, precisionFutureBlend, cfg);
+    aimPoint = (1.0 - precisionBlend) * aimPoint + precisionBlend * precisionAim;
+    futureTime = (1.0 - precisionBlend) * futureTime + precisionBlend * precisionFutureTime;
+    futurePoint = (1.0 - precisionBlend) * futurePoint + precisionBlend * precisionFuturePoint;
+    leadPoint = (1.0 - precisionBlend) * leadPoint + precisionBlend * precisionLeadPoint;
+    leadTime = (1.0 - precisionBlend) * leadTime + precisionBlend * precisionLeadTime;
+end
+
 navigationGain = lerp(cfg.guidance.ontologyMinNavigationConstant, cfg.guidance.ontologyMaxNavigationConstant, ...
     clamp01((0.45 + 0.70 * trackQuality + 0.25 * semantic.timeEfficiency) * ...
     (0.65 + 0.35 * landingIntent) * (1.0 - 0.30 * operationalRisk)));
 maxHorizontalStep = lerp(cfg.guidance.ontologyMinHorizontalStep, cfg.guidance.ontologyMaxHorizontalStep, ...
     clamp01((0.40 + 0.65 * trackQuality + 0.30 * efficiency) * ...
     (0.80 + 0.20 * landingIntent) * (1.0 - 0.20 * operationalRisk)));
+if precisionBlend > 0.0
+    precisionStep = lerp( ...
+        get_guidance_value(cfg, 'precisionMaxHorizontalStep', 0.85), ...
+        get_guidance_value(cfg, 'precisionFinalMaxHorizontalStep', 0.22), ...
+        precisionBlend);
+    maxHorizontalStep = min(maxHorizontalStep, precisionStep);
+    navigationGain = lerp(navigationGain, min(navigationGain, 1.0), precisionBlend);
+end
 descentAuthority = clamp01(landingIntent * semantic.relativeDistanceState * semantic.altitudeState * ...
     semantic.visualStability * semantic.droneMotionStability * semantic.roverMotionStability * ...
     semantic.energyEfficiency * (1.0 - operationalRisk));
 descentRate = lerp(cfg.guidance.ontologyMinDescentRate, cfg.guidance.ontologyMaxDescentRate, descentAuthority);
+if precisionBlend > 0.0
+    descentRate = min(descentRate, lerp( ...
+        get_guidance_value(cfg, 'precisionMaxDescentRate', 0.35), ...
+        get_guidance_value(cfg, 'precisionFinalDescentRate', 0.18), ...
+        precisionBlend));
+end
 alignRadius = cfg.guidance.alignRadius * lerp(0.75, 1.25, semantic.alignmentState);
 descentStartRadius = max(alignRadius, cfg.guidance.ontologyDescentStartRadius * ...
     lerp(0.65, 1.15, trackQuality) * lerp(1.05, 0.70, operationalRisk));
+horizontalSpeed = 0.0;
+if isfield(uavState, 'velocity') && numel(uavState.velocity) >= 2
+    horizontalSpeed = norm(uavState.velocity(1:2));
+end
+relativeSpeed = horizontalSpeed;
+if isfield(uavState, 'velocity') && numel(uavState.velocity) >= 2
+    relativeSpeed = norm(uavState.velocity(1:2) - markerVelocity(1:2));
+end
+landingAlignment = clamp01(0.50 * semantic.alignmentState + 0.20 * semantic.visualStability + ...
+    0.15 * (1.0 - normalize_range(relativeSpeed, get_guidance_value(cfg, 'precisionMaxRelativeSpeedForDescent', 0.45))) + ...
+    0.15 * (1.0 - normalize_range(horizontalSpeed, get_guidance_value(cfg, 'precisionMaxHorizontalSpeedForDescent', 0.70))));
 
 nodes = [
     node('VehicleState', 1.0, 'evidence', 'UAV pose, velocity, and attitude')
@@ -56,6 +102,7 @@ nodes = [
     node('ApproachAimPoint', trackQuality, 'trajectory', 'Predicted point used for horizontal guidance')
     node('HorizontalGuidance', clamp01(navigationGain / max(cfg.guidance.ontologyMaxNavigationConstant, eps)), 'trajectory', 'Horizontal pursuit authority')
     node('DescentAuthority', descentAuthority, 'trajectory', 'Permission to descend')
+    node('LandingAlignment', landingAlignment, 'terminal', 'Stable XY and relative-speed alignment before touchdown')
     node('FinalLandReadiness', clamp01(landingIntent * trackQuality * (1.0 - operationalRisk)), 'terminal', 'Readiness for final LAND mode')
 ];
 
@@ -84,6 +131,10 @@ edges = [
     edge('RoverMotionStability', 'DescentAuthority', 'requires', 0.14)
     edge('EnergyEfficiency', 'DescentAuthority', 'supports', 0.12)
     edge('OperationalRisk', 'DescentAuthority', 'limits', 0.18)
+    edge('AlignmentState', 'LandingAlignment', 'requires', 0.50)
+    edge('VisualStability', 'LandingAlignment', 'supports', 0.20)
+    edge('DroneMotionStability', 'LandingAlignment', 'limits_relative_speed', 0.30)
+    edge('LandingAlignment', 'FinalLandReadiness', 'requires', 0.45)
     edge('DescentAuthority', 'FinalLandReadiness', 'supports', 0.35)
     edge('TrackQuality', 'FinalLandReadiness', 'supports', 0.35)
     edge('OperationalRisk', 'FinalLandReadiness', 'limits', 0.30)
@@ -105,6 +156,10 @@ values.maxHorizontalStep = maxHorizontalStep;
 values.descentAuthority = descentAuthority;
 values.descentRate = descentRate;
 values.descentStartRadius = descentStartRadius;
+values.precisionBlend = precisionBlend;
+values.landingAlignment = landingAlignment;
+values.horizontalSpeed = horizontalSpeed;
+values.relativeSpeed = relativeSpeed;
 
 ontologyGraph = struct();
 ontologyGraph.name = 'LandingOntologyTrajectoryGraph';
@@ -118,10 +173,15 @@ ontologyGraph.timestamp = get_state_timestamp(uavState);
 end
 
 function [aimPoint, futureTime, futurePoint, leadPoint] = predicted_approach_point(markerPosition, markerVelocity, leadTime, cfg)
+futureBlend = clamp01(get_guidance_value(cfg, 'ontologyFuturePointBlend', 0.0));
+[aimPoint, futureTime, futurePoint, leadPoint] = ...
+    predicted_approach_point_with_blend(markerPosition, markerVelocity, leadTime, futureBlend, cfg);
+end
+
+function [aimPoint, futureTime, futurePoint, leadPoint] = predicted_approach_point_with_blend(markerPosition, markerVelocity, leadTime, futureBlend, cfg)
 predictionSteps = get_guidance_value(cfg, 'ontologyPredictionSteps', 0);
 predictionStepTime = get_guidance_value(cfg, 'ontologyPredictionStepTime', 0.0);
 predictionHorizon = get_guidance_value(cfg, 'ontologyPredictionHorizon', cfg.guidance.ontologyMaxLeadTime);
-futureBlend = clamp01(get_guidance_value(cfg, 'ontologyFuturePointBlend', 0.0));
 
 futureTime = min(max(leadTime, leadTime + predictionSteps * predictionStepTime), predictionHorizon);
 leadPoint = markerPosition(1:2) + markerVelocity(1:2) * leadTime;
