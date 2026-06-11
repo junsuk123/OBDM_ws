@@ -42,6 +42,9 @@ MAIN_TUNING.dt = 0.2;
 MAIN_TUNING.stopOnTouchdown = true;
 MAIN_TUNING.showOntologyGraph = true;
 MAIN_TUNING.visualizationVisible = true;
+MAIN_TUNING.web3dOntologyViewer = true;
+MAIN_TUNING.web3dOpenChrome = true;
+MAIN_TUNING.web3dPort = 8765;
 MAIN_TUNING.takeoffAltitude = 5.0;
 MAIN_TUNING.padMotionAmplitude = 1.0;
 MAIN_TUNING.padMotionFrequency = 0.01;
@@ -98,6 +101,10 @@ fprintf('[main] Wind: difficulty=%.2f mean=[%.2f %.2f %.2f] gustStd=[%.2f %.2f %
     cfg.wind.difficulty, cfg.wind.meanVelocity(1), cfg.wind.meanVelocity(2), cfg.wind.meanVelocity(3), ...
     cfg.wind.gustStd(1), cfg.wind.gustStd(2), cfg.wind.gustStd(3), cfg.wind.maxSpeed, cfg.simulator.windPublishPeriod);
 save(fullfile(runDir, 'main_pipeline_config.mat'), 'MAIN_PIPELINE', 'MAIN_TUNING', 'cfg');
+
+if cfg.visualization.web3dEnabled
+    cfg = start_web_ontology_viewer(cfg);
+end
 
 historicalData = empty_training_data();
 previousModel = struct();
@@ -222,6 +229,9 @@ for scenarioIdx = 1:cfg.simulation.numScenarios
             classProbability = [1.0 - baselineScore, baselineScore];
             confidence = max(classProbability);
         end
+
+        export_runtime_ontology_snapshot(uavState, windState, observation, semantic, ...
+            classProbability, confidence, predictedAction, cfg);
 
         sim = send_decision_command(sim, predictedAction, classProbability, confidence, cfg, uavState, observation, semantic);
 
@@ -559,6 +569,12 @@ end
 cfg.visualization.showOntologyGraph = tuning.showOntologyGraph;
 cfg.visualization.visible = tuning.visualizationVisible;
 cfg.visualization.saveFigures = pipeline.savePlots;
+cfg.visualization.web3dEnabled = isfield(tuning, 'web3dOntologyViewer') && logical(tuning.web3dOntologyViewer);
+cfg.visualization.web3dOpenChrome = ~isfield(tuning, 'web3dOpenChrome') || logical(tuning.web3dOpenChrome);
+cfg.visualization.web3dRuntimeExport = cfg.visualization.web3dEnabled;
+if isfield(tuning, 'web3dPort') && ~isempty(tuning.web3dPort)
+    cfg.visualization.web3dPort = round(double(tuning.web3dPort));
+end
 
 cfg.simulator.takeoffAltitude = tuning.takeoffAltitude;
 cfg.simulator.landingPadMotion.amplitude = tuning.padMotionAmplitude;

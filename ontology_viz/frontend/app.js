@@ -1,76 +1,91 @@
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
 const state = {
   graph: null,
   selected: null,
-  activeTrace: null,
-  hiddenNodeTypes: new Set(),
-  hiddenEdgeTypes: new Set(),
-  showInferred: true,
-  showTrace: true,
-  search: "",
-  transform: { x: 0, y: 0, scale: 1 },
-  dragging: null,
-  panning: null,
   eventSource: null,
   liveWanted: false,
-  pollTimer: null,
+  topologySignature: "",
+  nodeObjects: new Map(),
+  glowObjects: new Map(),
+  edgeObjects: new Map(),
+  nodeLabels: new Map(),
+  edgeLabels: new Map(),
+  labels: [],
+  clock: new THREE.Clock(),
+  raycaster: new THREE.Raycaster(),
+  pointer: new THREE.Vector2(),
 };
 
-const palette = [
-  "#0d7c86",
-  "#d4612f",
-  "#6c7a12",
-  "#7a5cc8",
-  "#b33f62",
-  "#2472a4",
-  "#8a6b21",
-  "#23845a",
-];
-
 const el = {
-  svg: document.querySelector("#graphSvg"),
-  viewport: document.querySelector("#viewport"),
-  edgeLayer: document.querySelector("#edgeLayer"),
-  nodeLayer: document.querySelector("#nodeLayer"),
+  canvasHost: document.querySelector("#graphCanvas"),
   title: document.querySelector("#graphTitle"),
   meta: document.querySelector("#graphMeta"),
   status: document.querySelector("#statusLine"),
-  metadata: document.querySelector("#metadataPanel"),
-  trace: document.querySelector("#tracePanel"),
   source: document.querySelector("#sourceInput"),
-  load: document.querySelector("#loadButton"),
   live: document.querySelector("#liveButton"),
-  poll: document.querySelector("#pollButton"),
+  load: document.querySelector("#loadButton"),
   reset: document.querySelector("#resetButton"),
-  search: document.querySelector("#searchInput"),
-  inferred: document.querySelector("#inferredToggle"),
-  traceToggle: document.querySelector("#traceToggle"),
-  nodeFilters: document.querySelector("#nodeTypeFilters"),
-  edgeFilters: document.querySelector("#edgeTypeFilters"),
+  selectedTitle: document.querySelector("#selectedTitle"),
+  metadata: document.querySelector("#metadataPanel"),
+  connections: document.querySelector("#connectionPanel"),
+  trace: document.querySelector("#tracePanel"),
 };
 
-function edgeKey(edge) {
-  return edge.id || `${edge.source}->${edge.target}:${edge.label || edge.type || "related_to"}`;
-}
+const palette = {
+  evidence: 0x24a3a6,
+  semantic: 0x3d7bd9,
+  inference: 0xc15ba4,
+  decision: 0xf0b33f,
+  prediction: 0x43a66d,
+  trajectory: 0xe1683a,
+  terminal: 0xde3e5f,
+  Entity: 0x8e9aa3,
+};
 
-function typeColor(type) {
-  const types = [...new Set((state.graph?.nodes || []).map((node) => node.type || "Entity"))].sort();
-  const index = Math.max(0, types.indexOf(type || "Entity"));
-  return palette[index % palette.length];
-}
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x071014);
+scene.fog = new THREE.Fog(0x071014, 70, 190);
+
+const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 500);
+camera.position.set(0, 24, 72);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+el.canvasHost.append(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 24;
+controls.maxDistance = 160;
+
+const graphGroup = new THREE.Group();
+scene.add(graphGroup);
+
+scene.add(new THREE.AmbientLight(0x9fb8c6, 0.7));
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.5);
+keyLight.position.set(18, 28, 20);
+scene.add(keyLight);
+const rimLight = new THREE.PointLight(0x39d5ff, 2.4, 120);
+rimLight.position.set(-30, 18, 28);
+scene.add(rimLight);
+
+const grid = new THREE.GridHelper(140, 28, 0x24424a, 0x16292f);
+grid.position.y = -24;
+scene.add(grid);
 
 function validateGraph(graph) {
   if (!graph || typeof graph !== "object") throw new Error("Graph must be an object.");
   if (!Array.isArray(graph.nodes)) throw new Error("Graph nodes must be a list.");
   if (!Array.isArray(graph.edges)) throw new Error("Graph edges must be a list.");
-  const nodeIds = new Set();
-  graph.nodes.forEach((node, index) => {
-    if (!node.id) throw new Error(`nodes[${index}].id is required.`);
-    if (nodeIds.has(node.id)) throw new Error(`Duplicate node id: ${node.id}`);
-    nodeIds.add(node.id);
-  });
-  graph.edges.forEach((edge, index) => {
-    if (!nodeIds.has(edge.source)) throw new Error(`edges[${index}].source is missing: ${edge.source}`);
-    if (!nodeIds.has(edge.target)) throw new Error(`edges[${index}].target is missing: ${edge.target}`);
+  const ids = new Set(graph.nodes.map((node) => node.id));
+  graph.edges.forEach((edge) => {
+    if (!ids.has(edge.source) || !ids.has(edge.target)) {
+      throw new Error(`Broken edge: ${edge.source} -> ${edge.target}`);
+    }
   });
   return graph;
 }
@@ -79,35 +94,364 @@ async function loadGraph(source) {
   setStatus(`loading ${source}`);
   const response = await fetch(source, { cache: "no-store" });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-  setGraph(await response.json(), `loaded ${source}`);
+  setGraph(await response.json(), `loaded ${source}`, { forceLayout: true });
 }
 
 function setGraph(graph, message, options = {}) {
   const nextGraph = validateGraph(graph);
-  const previousSelection = state.selected;
-  const selectedNode = nextGraph.selected?.node_id || nextGraph.nodes[0]?.id || null;
-  state.graph = nextGraph;
-  state.selected = selectionStillExists(previousSelection) ? previousSelection : selectedNode;
-  if (!options.preserveTrace) state.activeTrace = null;
-  if (!options.preserveFilters) {
-    state.hiddenNodeTypes.clear();
-    state.hiddenEdgeTypes.clear();
+  const signature = topologySignature(nextGraph);
+  const sameTopology = !options.forceLayout && signature === state.topologySignature && state.nodeObjects.size > 0;
+  state.graph = prepareLayout(nextGraph, { sameTopology });
+  if (!selectionExists(state.selected)) {
+    state.selected = state.graph.selected?.node_id || state.graph.nodes[0]?.id || null;
   }
-  layoutGraph();
-  if (!options.preserveView) resetView();
-  render();
-  setStatus(message || "graph loaded");
+  state.topologySignature = signature;
+  renderHeader();
+  if (sameTopology) {
+    updateGraphValues();
+  } else {
+    renderGraph();
+  }
+  renderInspector();
+  setStatus(message || "graph updated");
 }
 
-function liveSource() {
-  const configured = el.source.value.trim();
-  if (!configured || configured === "data/demo_graph.json") return "http://127.0.0.1:8765/events";
-  if (configured.includes("/events")) return configured;
-  if (configured.includes("/snapshot")) return configured.replace("/snapshot", "/events");
-  return "http://127.0.0.1:8765/events";
+function renderHeader() {
+  const graph = state.graph;
+  el.title.textContent = graph.graph_id || "Ontology 3D Monitor";
+  el.meta.textContent = `${graph.nodes.length} nodes, ${graph.edges.length} edges, stamp ${graph.stamp ?? "n/a"}`;
 }
 
-function selectionStillExists(selection) {
+function topologySignature(graph) {
+  const nodes = graph.nodes.map((node) => node.id).sort().join("|");
+  const edges = graph.edges.map(edgeKey).sort().join("|");
+  return `${nodes}::${edges}`;
+}
+
+function prepareLayout(graph, options = {}) {
+  const oldPositions = new Map();
+  state.nodeObjects.forEach((object, id) => oldPositions.set(id, object.position.clone()));
+
+  const count = Math.max(1, graph.nodes.length);
+  graph.nodes.forEach((node, index) => {
+    const old = oldPositions.get(node.id);
+    if (old) {
+      node.position = old;
+      return;
+    }
+    const ring = 18 + (index % 3) * 12;
+    const angle = (Math.PI * 2 * index) / count;
+    node.position = new THREE.Vector3(
+      Math.cos(angle) * ring,
+      ((index % 5) - 2) * 6,
+      Math.sin(angle) * ring,
+    );
+  });
+
+  if (options.sameTopology) return graph;
+
+  const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+  for (let tick = 0; tick < 220; tick += 1) {
+    for (let i = 0; i < graph.nodes.length; i += 1) {
+      for (let j = i + 1; j < graph.nodes.length; j += 1) {
+        const a = graph.nodes[i];
+        const b = graph.nodes[j];
+        const delta = a.position.clone().sub(b.position);
+        const dist = Math.max(0.1, delta.length());
+        const force = Math.min(1.1, 95 / (dist * dist));
+        delta.normalize().multiplyScalar(force);
+        a.position.add(delta);
+        b.position.sub(delta);
+      }
+    }
+    graph.edges.forEach((edge) => {
+      const source = byId.get(edge.source);
+      const target = byId.get(edge.target);
+      const delta = target.position.clone().sub(source.position);
+      const dist = Math.max(0.1, delta.length());
+      const desired = 18 + (1 - edgeStrength(edge)) * 13;
+      const force = (dist - desired) * 0.012;
+      delta.normalize().multiplyScalar(force);
+      source.position.add(delta);
+      target.position.sub(delta);
+    });
+    graph.nodes.forEach((node) => node.position.multiplyScalar(0.997));
+  }
+  return graph;
+}
+
+function renderGraph() {
+  graphGroup.clear();
+  state.nodeObjects.clear();
+  state.glowObjects.clear();
+  state.edgeObjects.clear();
+  state.nodeLabels.clear();
+  state.edgeLabels.clear();
+  state.labels.forEach((label) => label.remove());
+  state.labels = [];
+
+  const byId = new Map(state.graph.nodes.map((node) => [node.id, node]));
+  state.graph.edges.forEach((edge) => {
+    const source = byId.get(edge.source);
+    const target = byId.get(edge.target);
+    const active = isActiveEdge(edge);
+    const material = new THREE.LineBasicMaterial({
+      color: active ? 0x80f8ff : 0x66818d,
+      transparent: true,
+      opacity: active ? 0.95 : 0.42,
+    });
+    const geometry = new THREE.BufferGeometry().setFromPoints([source.position, target.position]);
+    const line = new THREE.Line(geometry, material);
+    line.userData = { kind: "edge", id: edgeKey(edge), edge };
+    graphGroup.add(line);
+    state.edgeObjects.set(edgeKey(edge), line);
+
+    const label = makeLabel(edge.label || edge.type || "related_to", "edge-label");
+    label.dataset.edgeId = edgeKey(edge);
+    state.edgeLabels.set(edgeKey(edge), label);
+    state.labels.push(label);
+    el.canvasHost.append(label);
+  });
+
+  state.graph.nodes.forEach((node) => {
+    const active = isActiveNode(node);
+    const selected = state.selected === node.id;
+    const radius = nodeRadius(node);
+    const color = palette[node.type] || palette.Entity;
+    const material = new THREE.MeshStandardMaterial({
+      color,
+      emissive: new THREE.Color(active || selected ? color : 0x000000),
+      emissiveIntensity: active || selected ? 0.85 : 0.12,
+      roughness: 0.38,
+      metalness: 0.08,
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 20), material);
+    mesh.position.copy(node.position);
+    mesh.scale.setScalar(radius);
+    mesh.userData = {
+      kind: "node",
+      id: node.id,
+      node,
+      baseRadius: radius,
+      targetRadius: radius,
+      displayRadius: radius,
+      targetActivation: activation(node),
+      displayActivation: activation(node),
+    };
+    graphGroup.add(mesh);
+    state.nodeObjects.set(node.id, mesh);
+
+    const glow = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 32, 16),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: active || selected ? (selected ? 0.24 : 0.14) : 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    glow.position.copy(node.position);
+    glow.scale.setScalar(radius * 1.55);
+    glow.userData = { glowFor: node.id };
+    graphGroup.add(glow);
+    state.glowObjects.set(node.id, glow);
+
+    const label = makeLabel(`${node.label || node.id}\n${activation(node).toFixed(2)}`, "node-label");
+    label.dataset.nodeId = node.id;
+    state.nodeLabels.set(node.id, label);
+    state.labels.push(label);
+    el.canvasHost.append(label);
+  });
+
+  renderTrace();
+}
+
+function updateGraphValues() {
+  const byId = new Map(state.graph.nodes.map((node) => [node.id, node]));
+  state.graph.nodes.forEach((node) => {
+    const mesh = state.nodeObjects.get(node.id);
+    if (!mesh) return;
+    const active = isActiveNode(node);
+    const selected = state.selected === node.id;
+    const color = palette[node.type] || palette.Entity;
+    const radius = nodeRadius(node);
+    mesh.userData.node = node;
+    mesh.userData.targetRadius = radius;
+    mesh.userData.targetActivation = activation(node);
+    mesh.material.color.setHex(color);
+    mesh.material.emissive.setHex(active || selected ? color : 0x000000);
+    mesh.material.emissiveIntensity = active || selected ? 0.85 : 0.12;
+
+    const glow = state.glowObjects.get(node.id);
+    if (glow) {
+      glow.material.color.setHex(color);
+      glow.material.opacity = active || selected ? (selected ? 0.24 : 0.14) : 0;
+    }
+
+    const label = state.nodeLabels.get(node.id);
+    if (label) {
+      const shown = mesh.userData.displayActivation ?? activation(node);
+      label.textContent = `${node.label || node.id}\n${shown.toFixed(2)}`;
+    }
+  });
+
+  state.graph.edges.forEach((edge) => {
+    const line = state.edgeObjects.get(edgeKey(edge));
+    if (!line) return;
+    const source = byId.get(edge.source);
+    const target = byId.get(edge.target);
+    if (source && target) {
+      const position = line.geometry.attributes.position;
+      position.setXYZ(0, source.position.x, source.position.y, source.position.z);
+      position.setXYZ(1, target.position.x, target.position.y, target.position.z);
+      position.needsUpdate = true;
+      line.geometry.computeBoundingSphere();
+    }
+    const active = isActiveEdge(edge);
+    line.userData.edge = edge;
+    line.material.color.setHex(active ? 0x80f8ff : 0x66818d);
+    line.material.opacity = active ? 0.95 : 0.42;
+    const label = state.edgeLabels.get(edgeKey(edge));
+    if (label) label.textContent = edge.label || edge.type || "related_to";
+  });
+
+  renderTrace();
+}
+
+function makeLabel(text, className) {
+  const label = document.createElement("div");
+  label.className = className;
+  label.textContent = text;
+  return label;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const t = state.clock.getElapsedTime();
+  state.nodeObjects.forEach((mesh) => {
+    const node = mesh.userData.node;
+    mesh.userData.displayActivation = lerpNumber(
+      mesh.userData.displayActivation ?? activation(node),
+      mesh.userData.targetActivation ?? activation(node),
+      0.34,
+    );
+    mesh.userData.displayRadius = lerpNumber(
+      mesh.userData.displayRadius ?? mesh.userData.baseRadius ?? 1,
+      mesh.userData.targetRadius ?? mesh.userData.baseRadius ?? 1,
+      0.34,
+    );
+    mesh.userData.baseRadius = mesh.userData.displayRadius;
+    const pulse = isActiveNode(node) || state.selected === node.id ? 1 + Math.sin(t * 4.5) * 0.07 : 1;
+    mesh.scale.setScalar((mesh.userData.baseRadius || 1) * pulse);
+    mesh.material.emissiveIntensity = isActiveNode(node) || state.selected === node.id
+      ? 0.72 + Math.sin(t * 5.5) * 0.22
+      : 0.1;
+    const label = state.nodeLabels.get(node.id);
+    if (label) label.textContent = `${node.label || node.id}\n${(mesh.userData.displayActivation ?? activation(node)).toFixed(2)}`;
+  });
+  state.glowObjects.forEach((glow, nodeId) => {
+    const mesh = state.nodeObjects.get(nodeId);
+    if (!mesh) return;
+    const node = mesh.userData.node;
+    const visible = isActiveNode(node) || state.selected === nodeId;
+    const pulse = visible ? 1.55 + Math.sin(t * 4.2) * 0.08 : 1.55;
+    glow.scale.setScalar((mesh.userData.baseRadius || 1) * pulse);
+    glow.material.opacity = visible ? (state.selected === nodeId ? 0.24 : 0.14) : 0;
+  });
+  controls.update();
+  renderer.render(scene, camera);
+  positionLabels();
+}
+
+function lerpNumber(current, target, amount) {
+  if (!Number.isFinite(current)) return target;
+  if (!Number.isFinite(target)) return current;
+  return current + (target - current) * amount;
+}
+
+function positionLabels() {
+  const rect = renderer.domElement.getBoundingClientRect();
+  state.labels.forEach((label) => {
+    let position = null;
+    if (label.dataset.nodeId) {
+      position = state.nodeObjects.get(label.dataset.nodeId)?.position;
+    } else if (label.dataset.edgeId) {
+      const line = state.edgeObjects.get(label.dataset.edgeId);
+      if (line) {
+        const arr = line.geometry.attributes.position.array;
+        position = new THREE.Vector3(
+          (arr[0] + arr[3]) / 2,
+          (arr[1] + arr[4]) / 2,
+          (arr[2] + arr[5]) / 2,
+        );
+      }
+    }
+    if (!position) return;
+    const projected = position.clone().project(camera);
+    const visible = projected.z < 1;
+    label.style.display = visible ? "block" : "none";
+    label.style.left = `${(projected.x * 0.5 + 0.5) * rect.width}px`;
+    label.style.top = `${(-projected.y * 0.5 + 0.5) * rect.height}px`;
+  });
+}
+
+function renderInspector() {
+  if (!state.graph) return;
+  const selected = getSelectedObject();
+  el.selectedTitle.textContent = selected?.label || selected?.id || edgeKey(selected) || "None";
+  el.metadata.textContent = JSON.stringify(selected || state.graph, null, 2);
+  renderConnections(selected);
+}
+
+function renderConnections(selected) {
+  el.connections.innerHTML = "";
+  if (!selected || !selected.id || !state.graph.nodes.some((node) => node.id === selected.id)) {
+    el.connections.textContent = "Select a node to inspect live relations.";
+    return;
+  }
+  const related = state.graph.edges.filter((edge) => edge.source === selected.id || edge.target === selected.id);
+  if (!related.length) {
+    el.connections.textContent = "No direct connections.";
+    return;
+  }
+  related.forEach((edge) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "connection-row";
+    row.textContent = `${edge.source} ${edge.label || edge.type || "related_to"} ${edge.target} (${edgeStrength(edge).toFixed(2)})`;
+    row.addEventListener("click", () => {
+      state.selected = { edge: edgeKey(edge) };
+      renderInspector();
+    });
+    el.connections.append(row);
+  });
+}
+
+function renderTrace() {
+  el.trace.innerHTML = "";
+  const trace = state.graph?.reasoning_trace || [];
+  if (!trace.length) {
+    el.trace.textContent = "No reasoning trace in this snapshot.";
+    return;
+  }
+  trace.forEach((step) => {
+    const item = document.createElement("div");
+    item.className = "trace-step";
+    item.textContent = `${step.step || ""} ${step.description || "Inference step"} (${Number(step.confidence ?? 0).toFixed(2)})`;
+    el.trace.append(item);
+  });
+}
+
+function getSelectedObject() {
+  if (!state.graph || !state.selected) return null;
+  if (typeof state.selected === "object" && state.selected.edge) {
+    return state.graph.edges.find((edge) => edgeKey(edge) === state.selected.edge) || null;
+  }
+  return state.graph.nodes.find((node) => node.id === state.selected) || null;
+}
+
+function selectionExists(selection) {
   if (!selection || !state.graph) return false;
   if (typeof selection === "object" && selection.edge) {
     return state.graph.edges.some((edge) => edgeKey(edge) === selection.edge);
@@ -115,332 +459,53 @@ function selectionStillExists(selection) {
   return state.graph.nodes.some((node) => node.id === selection);
 }
 
-function layoutGraph() {
-  const graph = state.graph;
-  const viewportWidth = Math.max(760, el.svg.clientWidth || 900);
-  const viewportHeight = Math.max(520, el.svg.clientHeight || 650);
-  const nodeCount = Math.max(1, graph.nodes.length);
-  const columns = Math.max(3, Math.ceil(Math.sqrt(nodeCount * 1.35)));
-  const rows = Math.max(2, Math.ceil(nodeCount / columns));
-  const width = Math.max(viewportWidth, columns * 360 + 360, 1280);
-  const height = Math.max(viewportHeight, rows * 300 + 320, 860);
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const radius = Math.min(width, height) * 0.43;
-  const nodes = graph.nodes;
-
-  nodes.forEach((node, index) => {
-    const angle = (Math.PI * 2 * index) / Math.max(1, nodes.length) - Math.PI / 2;
-    const ring = index % 2 === 0 ? radius : radius * 0.72;
-    node.x = centerX + Math.cos(angle) * ring;
-    node.y = centerY + Math.sin(angle) * ring;
-  });
-
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  for (let tick = 0; tick < 180; tick += 1) {
-    for (let i = 0; i < nodes.length; i += 1) {
-      for (let j = i + 1; j < nodes.length; j += 1) {
-        const a = nodes[i];
-        const b = nodes[j];
-        const dx = a.x - b.x || 0.01;
-        const dy = a.y - b.y || 0.01;
-        const distance = Math.max(1, Math.hypot(dx, dy));
-        const minDistance = nodeClearance(a) + nodeClearance(b);
-        const collision = Math.max(0, minDistance - distance) * 0.11;
-        const force = 16500 / (distance * distance) + collision;
-        a.x += (dx / distance) * force;
-        a.y += (dy / distance) * force;
-        b.x -= (dx / distance) * force;
-        b.y -= (dy / distance) * force;
-      }
-    }
-
-    graph.edges.forEach((edge) => {
-      const source = byId.get(edge.source);
-      const target = byId.get(edge.target);
-      if (!source || !target) return;
-      const dx = target.x - source.x;
-      const dy = target.y - source.y;
-      const distance = Math.max(1, Math.hypot(dx, dy));
-      const desired = edgeDistance(edge, source, target);
-      const force = (distance - desired) * 0.008;
-      source.x += (dx / distance) * force;
-      source.y += (dy / distance) * force;
-      target.x -= (dx / distance) * force;
-      target.y -= (dy / distance) * force;
-    });
-
-    nodes.forEach((node) => {
-      node.x += (centerX - node.x) * 0.004;
-      node.y += (centerY - node.y) * 0.004;
-      node.x = Math.max(150, Math.min(width - 150, node.x));
-      node.y = Math.max(130, Math.min(height - 130, node.y));
-    });
-  }
+function edgeKey(edge) {
+  return edge?.id || `${edge?.source}->${edge?.target}:${edge?.label || edge?.type || "related_to"}`;
 }
 
-function nodeClearance(node) {
-  const label = node.label || node.id || "";
-  const type = node.type || "Entity";
-  return 88 + Math.min(90, Math.max(label.length, type.length) * 3.4);
+function activation(node) {
+  return clamp01(Number(node.attributes?.activation ?? node.score ?? node.confidence ?? 0.5));
 }
 
-function edgeDistance(edge, source, target) {
-  const labelLength = String(edge.label || edge.type || "related_to").length;
-  return Math.max(280, nodeClearance(source) + nodeClearance(target) + labelLength * 3.5);
+function importance(node) {
+  return clamp01(Number(node.importance ?? node.attributes?.importance ?? activation(node)));
 }
 
-function render() {
-  if (!state.graph) return;
-  ensureDefs();
-  renderHeader();
-  renderFilters();
-  renderEdges();
-  renderNodes();
-  renderInspector();
-  renderTrace();
-  applyTransform();
+function nodeRadius(node) {
+  return 1.35 + importance(node) * 2.4 + degree(node.id) * 0.09;
 }
 
-function renderHeader() {
-  const graph = state.graph;
-  el.title.textContent = graph.graph_id || "Ontology Graph";
-  el.meta.textContent = `${graph.nodes.length} nodes, ${graph.edges.length} edges, stamp ${graph.stamp ?? "n/a"}`;
+function degree(nodeId) {
+  return (state.graph?.edges || []).filter((edge) => edge.source === nodeId || edge.target === nodeId).length;
 }
 
-function ensureDefs() {
-  if (el.svg.querySelector("defs")) return;
-  const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-  defs.innerHTML = `
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#80909a"></path>
-    </marker>
-  `;
-  el.svg.prepend(defs);
+function edgeStrength(edge) {
+  return clamp01(Number(edge.confidence ?? edge.weight ?? edge.attributes?.weight ?? 0.5));
 }
 
-function renderFilters() {
-  const nodeCounts = countBy(state.graph.nodes, (node) => node.type || "Entity");
-  const edgeCounts = countBy(state.graph.edges, (edge) => edge.type || edge.label || "related_to");
-  renderFilterList(el.nodeFilters, nodeCounts, state.hiddenNodeTypes, typeColor);
-  renderFilterList(el.edgeFilters, edgeCounts, state.hiddenEdgeTypes, () => "#80909a");
+function isActiveNode(node) {
+  return Boolean(node.active) || activation(node) >= 0.72;
 }
 
-function renderFilterList(container, counts, hiddenSet, colorFn) {
-  container.innerHTML = "";
-  [...counts.keys()].sort().forEach((type) => {
-    const label = document.createElement("label");
-    label.className = "filter-item";
-    label.innerHTML = `
-      <span class="swatch" style="background:${colorFn(type)}"></span>
-      <span>${escapeHtml(type)}</span>
-      <span class="count">${counts.get(type)}</span>
-    `;
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = !hiddenSet.has(type);
-    input.addEventListener("change", () => {
-      if (input.checked) hiddenSet.delete(type);
-      else hiddenSet.add(type);
-      render();
-    });
-    label.prepend(input);
-    container.append(label);
-  });
+function isActiveEdge(edge) {
+  return Boolean(edge.active) || edgeStrength(edge) >= 0.62;
 }
 
-function renderEdges() {
-  const byId = new Map(state.graph.nodes.map((node) => [node.id, node]));
-  el.edgeLayer.innerHTML = "";
-  state.graph.edges.forEach((edge, index) => {
-    const source = byId.get(edge.source);
-    const target = byId.get(edge.target);
-    if (!source || !target) return;
-    const id = edgeKey(edge);
-    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    const classes = ["edge"];
-    if (edge.inferred) classes.push("inferred");
-    if (isReasoningEdge(id)) classes.push("reasoning");
-    if (isEdgeFiltered(edge)) classes.push("filtered");
-    line.setAttribute("class", classes.join(" "));
-    line.setAttribute("x1", source.x);
-    line.setAttribute("y1", source.y);
-    line.setAttribute("x2", target.x);
-    line.setAttribute("y2", target.y);
-    line.addEventListener("click", (event) => {
-      event.stopPropagation();
-      state.selected = { edge: id };
-      renderInspector();
-    });
-    const dx = target.x - source.x;
-    const dy = target.y - source.y;
-    const distance = Math.max(1, Math.hypot(dx, dy));
-    const offset = 18 + (index % 3) * 8;
-    const direction = index % 2 === 0 ? 1 : -1;
-    label.setAttribute("class", `edge-label${isEdgeFiltered(edge) ? " filtered" : ""}`);
-    label.setAttribute("x", (source.x + target.x) / 2 + (-dy / distance) * offset * direction);
-    label.setAttribute("y", (source.y + target.y) / 2 + (dx / distance) * offset * direction);
-    label.textContent = edge.label || edge.type || "related_to";
-    group.append(line, label);
-    el.edgeLayer.append(group);
-  });
+function clamp01(value) {
+  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
 }
 
-function renderNodes() {
-  el.nodeLayer.innerHTML = "";
-  state.graph.nodes.forEach((node) => {
-    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    const classes = ["node"];
-    if (state.selected === node.id || state.graph.selected?.node_id === node.id) classes.push("selected");
-    if (isReasoningNode(node.id)) classes.push("reasoning");
-    if (isNodeFiltered(node)) classes.push("filtered");
-    group.setAttribute("class", classes.join(" "));
-    group.setAttribute("transform", `translate(${node.x}, ${node.y})`);
-    group.setAttribute("tabindex", "0");
-    group.addEventListener("click", (event) => {
-      event.stopPropagation();
-      state.selected = node.id;
-      render();
-    });
-    group.addEventListener("pointerdown", (event) => {
-      event.stopPropagation();
-      state.dragging = { node, start: pointerPoint(event), x: node.x, y: node.y };
-      group.setPointerCapture(event.pointerId);
-    });
-    group.addEventListener("pointermove", (event) => {
-      if (!state.dragging || state.dragging.node !== node) return;
-      const point = pointerPoint(event);
-      node.x = state.dragging.x + (point.x - state.dragging.start.x) / state.transform.scale;
-      node.y = state.dragging.y + (point.y - state.dragging.start.y) / state.transform.scale;
-      renderEdges();
-      renderNodes();
-    });
-    group.addEventListener("pointerup", () => {
-      state.dragging = null;
-    });
-
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("r", node.inferred ? "25" : "28");
-    circle.setAttribute("fill", typeColor(node.type || "Entity"));
-    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    text.setAttribute("y", 45);
-    text.textContent = node.label || node.id;
-    const type = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    type.setAttribute("class", "type-label");
-    type.setAttribute("y", 60);
-    type.textContent = node.type || "Entity";
-    group.append(circle, text, type);
-    el.nodeLayer.append(group);
-  });
+function resize() {
+  const rect = el.canvasHost.getBoundingClientRect();
+  renderer.setSize(rect.width, rect.height, false);
+  camera.aspect = rect.width / Math.max(1, rect.height);
+  camera.updateProjectionMatrix();
 }
 
-function renderInspector() {
-  const selected = getSelectedObject();
-  el.metadata.textContent = JSON.stringify(selected || state.graph, null, 2);
-}
-
-function renderTrace() {
-  const steps = state.graph.reasoning_trace || [];
-  el.trace.innerHTML = "";
-  if (!steps.length) {
-    el.trace.textContent = "No reasoning trace in this snapshot.";
-    return;
-  }
-  steps.forEach((step, index) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `trace-step${state.activeTrace === index ? " active" : ""}`;
-    button.innerHTML = `
-      <strong>Step ${step.step ?? index + 1}</strong>
-      <span>${escapeHtml(step.description || "Inference step")}</span>
-    `;
-    button.addEventListener("click", () => {
-      state.activeTrace = state.activeTrace === index ? null : index;
-      render();
-    });
-    el.trace.append(button);
-  });
-}
-
-function getSelectedObject() {
-  if (!state.graph) return null;
-  if (typeof state.selected === "object" && state.selected.edge) {
-    return state.graph.edges.find((edge) => edgeKey(edge) === state.selected.edge);
-  }
-  return state.graph.nodes.find((node) => node.id === state.selected);
-}
-
-function activeTraceStep() {
-  if (state.activeTrace == null || !state.showTrace) return null;
-  return (state.graph.reasoning_trace || [])[state.activeTrace] || null;
-}
-
-function isReasoningNode(nodeId) {
-  const step = activeTraceStep();
-  return Boolean(step?.nodes?.includes(nodeId));
-}
-
-function isReasoningEdge(id) {
-  const step = activeTraceStep();
-  return Boolean(step?.edges?.includes(id));
-}
-
-function isNodeFiltered(node) {
-  const text = `${node.id} ${node.label || ""} ${node.type || ""}`.toLowerCase();
-  return state.hiddenNodeTypes.has(node.type || "Entity") || (state.search && !text.includes(state.search));
-}
-
-function isEdgeFiltered(edge) {
-  const type = edge.type || edge.label || "related_to";
-  const text = `${edge.id || ""} ${edge.label || ""} ${type}`.toLowerCase();
-  return state.hiddenEdgeTypes.has(type) || (!state.showInferred && edge.inferred) || (state.search && !text.includes(state.search));
-}
-
-function countBy(items, fn) {
-  const counts = new Map();
-  items.forEach((item) => {
-    const key = fn(item);
-    counts.set(key, (counts.get(key) || 0) + 1);
-  });
-  return counts;
-}
-
-function resetView() {
-  if (!state.graph?.nodes?.length) {
-    state.transform = { x: 0, y: 0, scale: 1 };
-    applyTransform();
-    return;
-  }
-  const rect = el.svg.getBoundingClientRect();
-  const width = Math.max(760, rect.width || el.svg.clientWidth || 900);
-  const height = Math.max(520, rect.height || el.svg.clientHeight || 650);
-  const xs = state.graph.nodes.map((node) => node.x);
-  const ys = state.graph.nodes.map((node) => node.y);
-  const minX = Math.min(...xs) - 140;
-  const maxX = Math.max(...xs) + 140;
-  const minY = Math.min(...ys) - 120;
-  const maxY = Math.max(...ys) + 120;
-  const graphWidth = Math.max(1, maxX - minX);
-  const graphHeight = Math.max(1, maxY - minY);
-  const scale = Math.min(1, (width - 56) / graphWidth, (height - 56) / graphHeight);
-  state.transform = {
-    x: (width - graphWidth * scale) / 2 - minX * scale,
-    y: (height - graphHeight * scale) / 2 - minY * scale,
-    scale,
-  };
-  applyTransform();
-}
-
-function applyTransform() {
-  const { x, y, scale } = state.transform;
-  el.viewport.setAttribute("transform", `translate(${x}, ${y}) scale(${scale})`);
-}
-
-function pointerPoint(event) {
-  const rect = el.svg.getBoundingClientRect();
-  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+function resetCamera() {
+  camera.position.set(0, 24, 72);
+  controls.target.set(0, 0, 0);
+  controls.update();
 }
 
 function setStatus(message, isError = false) {
@@ -448,80 +513,27 @@ function setStatus(message, isError = false) {
   el.status.classList.toggle("error", isError);
 }
 
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#039;",
-  }[char]));
+function liveSource() {
+  const source = el.source.value.trim();
+  if (source.includes("/events")) return source;
+  if (source.includes("/snapshot")) return source.replace("/snapshot", "/events");
+  return source || "http://127.0.0.1:8765/events";
 }
 
-el.load.addEventListener("click", () => {
-  stopLive();
-  stopPolling();
-  const source = el.source.value.trim();
-  const snapshotSource = source.includes("/events") ? source.replace("/events", "/snapshot") : source;
-  loadGraph(snapshotSource || "data/demo_graph.json").catch((error) => setStatus(error.message, true));
-});
-
-el.live.addEventListener("click", () => {
-  if (state.eventSource) {
-    stopLive();
-    return;
-  }
-  startLive();
-});
-
 function startLive() {
-  stopPolling();
-  if (state.eventSource) return;
+  stopLive();
   state.liveWanted = true;
   const source = liveSource();
   state.eventSource = new EventSource(source);
   el.live.classList.add("active");
-  setStatus(`waiting for live ${source}`);
+  setStatus(`waiting for ${source}`);
   state.eventSource.onopen = () => setStatus(`live connected ${source}`);
   state.eventSource.addEventListener("graph", (event) => {
-    setGraph(JSON.parse(event.data), `live update ${new Date().toLocaleTimeString()}`, {
-      preserveFilters: true,
-      preserveTrace: true,
-      preserveView: true,
-    });
+    setGraph(JSON.parse(event.data), `live update ${new Date().toLocaleTimeString()}`);
   });
   state.eventSource.onerror = () => {
-    if (state.liveWanted) setStatus(`waiting for live ${source}`);
+    if (state.liveWanted) setStatus(`waiting for ${source}`);
   };
-}
-
-el.poll.addEventListener("click", () => {
-  if (state.pollTimer) {
-    stopPolling();
-    return;
-  }
-  stopLive();
-  pollGraph();
-  state.pollTimer = window.setInterval(pollGraph, 1000);
-  el.poll.classList.add("active");
-});
-
-function pollGraph() {
-  const configured = el.source.value.trim();
-  const source = configured.includes("/events")
-    ? configured.replace("/events", "/snapshot")
-    : (configured || "http://127.0.0.1:8765/snapshot");
-  fetch(source, { cache: "no-store" })
-    .then((response) => {
-      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-      return response.json();
-    })
-    .then((graph) => setGraph(graph, `polled ${new Date().toLocaleTimeString()}`, {
-      preserveFilters: true,
-      preserveTrace: true,
-      preserveView: true,
-    }))
-    .catch((error) => setStatus(error.message, true));
 }
 
 function stopLive() {
@@ -531,78 +543,39 @@ function stopLive() {
     state.eventSource = null;
   }
   el.live.classList.remove("active");
-  setStatus("live disconnected");
 }
 
-function stopPolling() {
-  if (!state.pollTimer) return;
-  window.clearInterval(state.pollTimer);
-  state.pollTimer = null;
-  el.poll.classList.remove("active");
-  setStatus("polling stopped");
-}
+renderer.domElement.addEventListener("pointerdown", (event) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  state.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  state.pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+  state.raycaster.setFromCamera(state.pointer, camera);
+  const hits = state.raycaster.intersectObjects([...state.nodeObjects.values(), ...state.edgeObjects.values()]);
+  if (!hits.length) return;
+  const hit = hits[0].object.userData;
+  state.selected = hit.kind === "edge" ? { edge: hit.id } : hit.id;
+  renderGraph();
+  renderInspector();
+});
 
-window.addEventListener("beforeunload", () => {
+el.live.addEventListener("click", () => {
+  if (state.eventSource) stopLive();
+  else startLive();
+});
+
+el.load.addEventListener("click", () => {
   stopLive();
-  stopPolling();
+  const source = el.source.value.trim();
+  const snapshot = source.includes("/events") ? source.replace("/events", "/snapshot") : source;
+  loadGraph(snapshot || "/viewer/data/demo_graph.json").catch((error) => setStatus(error.message, true));
 });
 
-el.reset.addEventListener("click", () => {
-  layoutGraph();
-  resetView();
-  render();
-});
+el.reset.addEventListener("click", resetCamera);
+window.addEventListener("resize", resize);
+window.addEventListener("beforeunload", stopLive);
 
-el.search.addEventListener("input", () => {
-  state.search = el.search.value.trim().toLowerCase();
-  render();
-});
-
-el.inferred.addEventListener("change", () => {
-  state.showInferred = el.inferred.checked;
-  render();
-});
-
-el.traceToggle.addEventListener("change", () => {
-  state.showTrace = el.traceToggle.checked;
-  render();
-});
-
-el.svg.addEventListener("click", () => {
-  state.selected = null;
-  render();
-});
-
-el.svg.addEventListener("pointerdown", (event) => {
-  if (event.target !== el.svg) return;
-  state.panning = { start: pointerPoint(event), x: state.transform.x, y: state.transform.y };
-  el.svg.classList.add("dragging");
-});
-
-el.svg.addEventListener("pointermove", (event) => {
-  if (!state.panning) return;
-  const point = pointerPoint(event);
-  state.transform.x = state.panning.x + point.x - state.panning.start.x;
-  state.transform.y = state.panning.y + point.y - state.panning.start.y;
-  applyTransform();
-});
-
-window.addEventListener("pointerup", () => {
-  state.panning = null;
-  el.svg.classList.remove("dragging");
-});
-
-el.svg.addEventListener("wheel", (event) => {
-  event.preventDefault();
-  const point = pointerPoint(event);
-  const oldScale = state.transform.scale;
-  const newScale = Math.max(0.25, Math.min(3, oldScale * (event.deltaY < 0 ? 1.1 : 0.9)));
-  state.transform.x = point.x - ((point.x - state.transform.x) / oldScale) * newScale;
-  state.transform.y = point.y - ((point.y - state.transform.y) / oldScale) * newScale;
-  state.transform.scale = newScale;
-  applyTransform();
-}, { passive: false });
-
-loadGraph("data/demo_graph.json")
+resize();
+animate();
+loadGraph("/viewer/data/demo_graph.json")
   .catch((error) => setStatus(error.message, true))
-  .finally(() => startLive());
+  .finally(startLive);

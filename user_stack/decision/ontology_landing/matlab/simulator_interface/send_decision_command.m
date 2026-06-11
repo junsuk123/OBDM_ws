@@ -68,6 +68,18 @@ if isfield(cfg, 'visualization') && isfield(cfg.visualization, 'showOntologyGrap
     end
 end
 
+runtimeExportActive = isfield(cfg, 'visualization') && isfield(cfg.visualization, 'web3dRuntimeExport') && ...
+    cfg.visualization.web3dRuntimeExport;
+if ~runtimeExportActive && isfield(trajectory, 'ontologyGraph') && isstruct(trajectory.ontologyGraph) && ...
+        isfield(trajectory.ontologyGraph, 'nodes') && isfield(trajectory.ontologyGraph, 'edges')
+    try
+        export_ontology_graph_snapshot(trajectory.ontologyGraph, cfg, trajectory, action, classProbability, confidence);
+    catch exportError
+        warning('ontology_viewer:ExportFailed', ...
+            '[ontology_viewer] Failed to export web graph snapshot: %s', exportError.message);
+    end
+end
+
 if strcmpi(trajectory.command, 'land')
     log_trajectory_debug('land_request', sim, uavState, observation, semantic, trajectory, [0.0, 0.0, 0.0], timestamp);
     if ~sim.guidance.landModeSent
