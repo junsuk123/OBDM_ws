@@ -8,6 +8,11 @@ sim.landingStackReady = false;
 sim.padMotion.amplitude = cfg.simulator.landingPadMotion.amplitude;
 sim.padMotion.frequency = cfg.simulator.landingPadMotion.frequency;
 sim.padMotion.speed = cfg.simulator.landingPadMotion.speed;
+roverMaxSpeed = max(0.05, double(sim.padMotion.speed));
+roverMinRandomSpeed = min(roverMaxSpeed, max(0.05, 0.25 * roverMaxSpeed));
+sim.padMotion.randomSpeedEnabled = true;
+sim.padMotion.randomMinSpeed = roverMinRandomSpeed;
+sim.padMotion.randomMaxSpeed = roverMaxSpeed;
 
 if isfield(sim, 'padModule') && ~isempty(sim.padModule)
     try
@@ -34,18 +39,19 @@ moduleCfg.targetInitialY = initialForwardOffsetM * sin(moduleCfg.targetInitialYa
 moduleCfg.targetMotionMode = 'waypoints';
 moduleCfg.targetCircleRadiusM = 0.6;
 moduleCfg.targetCircleAngularSpeed = 0.24;
-moduleCfg.targetRandomMinSpeed = 0.35;
-moduleCfg.targetRandomMaxSpeed = 0.75;
+moduleCfg.targetRandomMinSpeed = roverMinRandomSpeed;
+moduleCfg.targetRandomMaxSpeed = roverMaxSpeed;
 moduleCfg.targetRandomYawrateMax = 0.28;
 moduleCfg.targetRandomChangePeriod = 2.5;
 moduleCfg.targetRandomLateralRangeM = 0.8;
 moduleCfg.targetWaypoints = '0,0;10,0;18,0.4;26,1.6;42,1.6;50,1.2;58,0;80,0;100,0';
-moduleCfg.targetWaypointSpeed = 1.35;
+moduleCfg.targetWaypointSpeed = roverMaxSpeed;
 moduleCfg.targetWaypointReachedRadius = 0.55;
 moduleCfg.targetWaypointYawrateMax = 0.35;
 moduleCfg.targetWaypointHeadingGain = 1.1;
 moduleCfg.targetWaypointLoop = false;
-moduleCfg.targetMaxSpeed = 1.8;
+moduleCfg.targetRandomizeWaypointSpeed = true;
+moduleCfg.targetMaxSpeed = roverMaxSpeed;
 moduleCfg.targetSpawnForwardM = 0.0;
 moduleCfg.targetMotionRangeM = 100.0;
 moduleCfg.targetMinForwardOffsetM = 0.0;
@@ -61,6 +67,13 @@ moduleCfg.touchdownXYTolerance = cfg.labeling.touchdownPositionError;
 moduleCfg.touchdownMaxAbsVz = max(get_labeling_value(cfg, 'touchdownMaxAbsVz', cfg.labeling.safeVerticalSpeed), 1.0);
 moduleCfg.touchdownGroundZThreshold = get_labeling_value(cfg, 'touchdownGroundAltitude', cfg.labeling.touchdownAltitude);
 moduleCfg.touchdownGroundXYTolerance = get_labeling_value(cfg, 'touchdownGroundPositionError', cfg.labeling.touchdownPositionError);
+% Keep one realtime guidance publisher in charge. MATLAB supervises, logs,
+% and handles reset/touchdown while the ROS trajectory generator publishes
+% guidance-law commands continuously.
+moduleCfg.useRealtimeTrajectoryGenerator = true;
+if isfield(cfg, 'guidance') && isfield(cfg.guidance, 'useRealtimeTrajectoryGenerator')
+    moduleCfg.useRealtimeTrajectoryGenerator = logical(cfg.guidance.useRealtimeTrajectoryGenerator);
+end
 
 try
     sim.padModule = MovingLandingTargetModule();
@@ -99,7 +112,7 @@ try
     if fid < 0
         return;
     end
-    cleanupObj = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    cleanupObj = onCleanup(@() fclose(fid));
     fprintf(fid, '%s event=%s message=%s\n', datestr(now, 'yyyy-mm-ddTHH:MM:SS.FFF'), eventName, message);
 catch
 end

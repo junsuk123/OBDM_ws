@@ -88,19 +88,11 @@ cameraMarkerOk = false;
 % is intermittent or the camera topic is delayed.
 if tagDetected || ~visibleOk
     [markerOk, markerPosition] = read_ros_vector_field('/landing_marker/odom', 'pose.pose.position');
-    [velOk, markerVelocityRead] = read_ros_vector_field('/landing_marker/odom', 'twist.twist.linear');
-    if velOk
-        markerVelocity = markerVelocityRead;
-    end
     cameraMarkerOk = markerOk;
 end
 
 if ~markerOk
     [markerOk, markerPosition] = read_ros_vector_field('/landing_marker/ground_truth/odom', 'pose.pose.position');
-    [velOk, markerVelocityRead] = read_ros_vector_field('/landing_marker/ground_truth/odom', 'twist.twist.linear');
-    if velOk
-        markerVelocity = markerVelocityRead;
-    end
     if markerOk
         source = '/landing_marker/ground_truth/odom';
     end
@@ -108,17 +100,14 @@ end
 
 if markerOk
     tagDetected = cameraMarkerOk && tagDetected;
+    markerVelocity = estimate_marker_velocity(sim, markerPosition, uavState.timestamp, cfg);
 else
-    if ~visibleOk
-        return;
-    end
+    observation = struct();
+    ok = false;
+    return;
 end
 
-if markerOk
-    positionError = norm(uavState.position(1:2) - markerPosition(1:2));
-else
-    positionError = norm(uavState.position(1:2));
-end
+positionError = norm(uavState.position(1:2) - markerPosition(1:2));
 
 windPenalty = min(1.0, windState.speed / max(cfg.ontology.windSpeedReference, eps));
 alignmentPenalty = min(1.0, positionError / max(cfg.ontology.positionErrorReference, eps));
@@ -162,14 +151,32 @@ sim.truth.observation = observation;
 ok = true;
 end
 
+function velocity = estimate_marker_velocity(sim, markerPosition, timestamp, cfg)
+velocity = [0.0, 0.0, 0.0];
+if ~isfield(sim, 'truth') || ~isfield(sim.truth, 'observation') || ...
+        ~isstruct(sim.truth.observation) || ~isfield(sim.truth.observation, 'markerPosition')
+    return;
+end
+previous = sim.truth.observation;
+if ~isfield(previous, 'timestamp') || isempty(previous.timestamp) || ...
+        numel(previous.markerPosition) < 3 || any(~isfinite(previous.markerPosition(1:2)))
+    return;
+end
+dt = max(timestamp - previous.timestamp, cfg.simulation.dt);
+velocity = (markerPosition - previous.markerPosition) ./ max(dt, eps);
+if any(~isfinite(velocity))
+    velocity = [0.0, 0.0, 0.0];
+end
+end
+
 function [ok, value] = read_ros_bool_field(topic, fieldName)
 ok = false;
 value = false;
-qosProfiles = {'reliable', 'best_effort', 'system_default'};
+qosProfiles = {'best_effort', 'reliable'};
 output = '';
 for idx = 1:numel(qosProfiles)
-    cmd = sprintf(['timeout 2 %s bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
-        'export ROS_DOMAIN_ID=0; timeout 1.4 ros2 topic echo --no-daemon --spin-time 0.4 ' ...
+    cmd = sprintf(['timeout 0.6 %s bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
+        'export ROS_DOMAIN_ID=0; timeout 0.35 ros2 topic echo --no-daemon --spin-time 0.12 ' ...
         '--qos-reliability %s --once --field "%s" "%s" std_msgs/msg/Bool 2>/dev/null'''], ...
         clean_env_command_prefix(), qosProfiles{idx}, fieldName, topic);
     [status, candidate] = system(cmd);
@@ -189,11 +196,11 @@ end
 function [ok, vector] = read_ros_vector_field(topic, fieldName)
 ok = false;
 vector = [nan, nan, nan];
-qosProfiles = {'reliable', 'best_effort', 'system_default'};
+qosProfiles = {'best_effort', 'reliable'};
 output = '';
 for idx = 1:numel(qosProfiles)
-    cmd = sprintf(['timeout 2 %s bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
-        'export ROS_DOMAIN_ID=0; timeout 1.4 ros2 topic echo --no-daemon --spin-time 0.4 ' ...
+    cmd = sprintf(['timeout 0.6 %s bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
+        'export ROS_DOMAIN_ID=0; timeout 0.35 ros2 topic echo --no-daemon --spin-time 0.12 ' ...
         '--qos-reliability %s --once --field "%s" "%s" nav_msgs/msg/Odometry 2>/dev/null'''], ...
         clean_env_command_prefix(), qosProfiles{idx}, fieldName, topic);
     [status, candidate] = system(cmd);

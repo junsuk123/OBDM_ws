@@ -8,7 +8,7 @@ Current ontology landing stack components:
 
 - Perception: `user_stack/perception/aruco/aruco_camera_detector_node.py`
 - Guidance: `user_stack/guidance/ontology_landing/realtime_ontology_trajectory_generator.py`
-- Decision: `user_stack/decision/ontology_landing/matlab/ontology_features`, `feature_fusion`, `decision_model`, `labeling`
+- Decision: `user_stack/decision/ontology_landing/matlab/ontology_features`, `labeling`, `evaluation`
 - Control bridge: `bridges/mavlink/mavlink_guidance_streamer.py`
 - Evaluation: `user_stack/decision/ontology_landing/matlab/evaluation`, `visualization`
 
@@ -25,8 +25,6 @@ user_stack/
       python/
       config/
       ontology_features/
-      feature_fusion/
-      decision_model/
       stochastic_model/
       labeling/
       evaluation/

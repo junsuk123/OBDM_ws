@@ -29,6 +29,14 @@ def limit_vector(x, y, max_norm):
     return x, y
 
 
+def wrap_pi(angle):
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
+
+
 def quat_to_yaw(x, y, z, w):
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
@@ -70,6 +78,8 @@ class RealtimeOntologyTrajectoryGenerator:
         self.last_ontology = None
         self.guidance_mode = "SEARCH"
         self.direct_land_since = None
+        self.direct_touchdown_ready = False
+        self.last_direct_ready_log_t = 0.0
         self.land_requested = False
         self.last_odom_t = 0.0
         self.wind = {"x": 0.0, "y": 0.0, "z": 0.0, "speed": 0.0}
@@ -97,6 +107,7 @@ class RealtimeOntologyTrajectoryGenerator:
             self.node.create_subscription(Odometry, args.fallback_marker_topic, self.on_fallback_marker, reliable)
         self.node.create_subscription(Bool, args.visible_topic, self.on_visible, reliable)
         self.setpoint_pub = self.node.create_publisher(PoseStamped, args.setpoint_topic, 10)
+        self.destination_pub = self.node.create_publisher(PoseStamped, args.destination_topic, 10)
         self.velocity_pub = self.node.create_publisher(TwistStamped, args.velocity_topic, 10)
         self.accel_pub = self.node.create_publisher(AccelStamped, args.accel_topic, 10)
         self.land_pub = self.node.create_publisher(Bool, args.land_topic, 10)
@@ -191,9 +202,10 @@ class RealtimeOntologyTrajectoryGenerator:
             "vy": float(v.y) + nvy,
             "vz": float(v.z) + nvz,
         }
+        previous_source = self.marker_source
         self.marker_source = source
         self.marker_t = now
-        self.update_marker_ekf(self.marker_t, self.marker)
+        self.update_marker_ekf(self.marker_t, self.marker, source, previous_source)
         if source == "camera":
             self.visible = True
 
@@ -202,6 +214,27 @@ class RealtimeOntologyTrajectoryGenerator:
         cur = (float(p.x), float(p.y), float(p.z))
         if not all(math.isfinite(v) for v in cur):
             return False
+        if self.last_camera_marker_raw is None and self.ekf_state is not None:
+            dt = clamp(now - self.ekf_t, 0.0, self.args.marker_hold_timeout)
+            pred = (
+                self.ekf_state[0] + self.ekf_state[3] * dt,
+                self.ekf_state[1] + self.ekf_state[4] * dt,
+                self.ekf_state[2] + self.ekf_state[5] * dt,
+            )
+            horizontal_jump = math.hypot(cur[0] - pred[0], cur[1] - pred[1])
+            vertical_jump = abs(cur[2] - pred[2])
+            if (
+                horizontal_jump > self.args.camera_marker_max_position_jump
+                or vertical_jump > self.args.camera_marker_max_vertical_jump
+            ):
+                self.rejected_camera_marker_count += 1
+                if now - self.last_marker_reject_log_t >= self.args.log_period:
+                    self.node.get_logger().warn(
+                        f"rejected first camera marker against active track #{self.rejected_camera_marker_count}: "
+                        f"jump_xy={horizontal_jump:.2f}m, jump_z={vertical_jump:.2f}m"
+                    )
+                    self.last_marker_reject_log_t = now
+                return False
         if self.last_camera_marker_raw is None or self.last_camera_marker_raw_t <= 0.0:
             return True
 
@@ -338,107 +371,72 @@ class RealtimeOntologyTrajectoryGenerator:
         )
         self.last_ontology = ontology
         mode = ontology["values"]["guidanceMode"]
-        lead_time = ontology["values"]["leadTime"]
         rel_vx = self.drone["vx"] - mvx
         rel_vy = self.drone["vy"] - mvy
         relative_speed = math.hypot(rel_vx, rel_vy)
-        intercept_lead = clamp(
-            current_pad_dist / max(self.args.intercept_nominal_speed, 1.0e-3),
-            self.args.min_lead_time,
-            self.args.max_lead_time,
-        )
-        if mode == "INTERCEPT":
-            lead_time = lerp(lead_time, intercept_lead, self.args.intercept_lead_blend)
-        aim_x, aim_y, future_time = self.predicted_approach_point(now, lead_time)
         marker_speed = math.hypot(mvx, mvy)
-        if mode == "PAD_CAPTURE":
-            capture_blend = ontology["values"]["captureBlend"]
-            aim_x = capture_blend * mx + (1.0 - capture_blend) * aim_x
-            aim_y = capture_blend * my + (1.0 - capture_blend) * aim_y
-        elif mode in ("FINAL_DESCENT", "LAND_READY"):
-            terminal = self.terminal_landing_solution(now, mz, descent_rate=ontology["values"]["descentRate"])
-            aim_x = terminal["aim_x"]
-            aim_y = terminal["aim_y"]
-            future_time = terminal["prediction_time"]
-        damping_time = self.velocity_damping_time(mode)
-        aim_damping_time = 0.0
-        if mode == "INTERCEPT":
-            aim_damping_time = damping_time
-        elif mode == "PAD_CAPTURE":
-            capture_span = max(self.args.pad_capture_radius - self.args.final_descent_radius, 1.0e-3)
-            capture_progress = clamp(
-                (current_pad_dist - self.args.final_descent_radius) / capture_span,
-                0.0,
-                1.0,
-            )
-            aim_damping_time = (
-                damping_time
-                * clamp(self.args.capture_aim_damping_scale, 0.0, 1.0)
-                * capture_progress
-            )
-        if aim_damping_time > 0.0:
-            aim_x -= rel_vx * aim_damping_time
-            aim_y -= rel_vy * aim_damping_time
-        aim_x, aim_y, aim_corridor_offset, aim_corridor_limit = self.constrain_approach_aim(
+        guidance = self.select_guidance_algorithm(
             now,
-            mode,
-            aim_x,
-            aim_y,
-            current_pad_dist,
-            future_time,
+            ontology,
+            marker=(mx, my, mz, mvx, mvy),
+            current_pad_dist=current_pad_dist,
+            marker_age=marker_age,
+            camera_marker_age=camera_marker_age,
+            altitude_above_pad=altitude_above_pad,
         )
-        descent_center_time = min(future_time, self.args.descent_center_prediction_time)
-        if mode in ("FINAL_DESCENT", "LAND_READY"):
-            terminal = self.terminal_landing_solution(now, mz, descent_rate=ontology["values"]["descentRate"])
-            center_error = terminal["touchdown_error"]
-            wind_speed = terminal["wind_speed"]
-            terminal_prediction_time = terminal["prediction_time"]
-            terminal_inertia_time = terminal["inertia_time"]
-        else:
-            center_x, center_y, _, _, _, _ = self.predicted_marker_state(now, descent_center_time)
-            center_error = math.hypot(center_x - self.drone["x"], center_y - self.drone["y"])
-            wind_speed = self.current_wind_speed(now)
-            terminal_prediction_time = 0.0
-            terminal_inertia_time = 0.0
-        dx = aim_x - self.drone["x"]
-        dy = aim_y - self.drone["y"]
-        dist = math.hypot(dx, dy)
+        ontology["values"]["selectedGuidanceAlgorithm"] = guidance["algorithm"]
+        ontology["semantic"]["guidanceAlgorithmScores"] = guidance["scores"]
+        ontology["semantic"]["guidanceAlgorithmReason"] = guidance["reason"]
+        lead_time = guidance.get("lead_time", 0.0)
+        intercept_lead = guidance.get("intercept_lead", 0.0)
+        future_time = guidance.get("future_time", 0.0)
+        aim_x = guidance["aim_x"]
+        aim_y = guidance["aim_y"]
+        aim_corridor_offset = guidance.get("corridor_offset", 0.0)
+        aim_corridor_limit = guidance.get("corridor_limit", 0.0)
+        descent_center_time = guidance.get("descent_center_time", 0.0)
+        center_error = current_pad_dist
+        wind_speed = self.current_wind_speed(now)
+        terminal_prediction_time = guidance.get("terminal_prediction_time", 0.0)
+        terminal_inertia_time = guidance.get("terminal_inertia_time", 0.0)
+        tx = guidance["setpoint_x"]
+        ty = guidance["setpoint_y"]
+        dx = tx - self.drone["x"]
+        dy = ty - self.drone["y"]
+        dist = math.hypot(aim_x - self.drone["x"], aim_y - self.drone["y"])
 
-        if dist > 1.0e-6:
-            max_step = clamp(
-                ontology["values"]["maxHorizontalStep"],
-                self.args.min_step,
-                self.args.max_step,
-            )
-            if mode in ("FINAL_DESCENT", "LAND_READY"):
-                max_step = min(max_step, max(self.args.min_step, current_pad_dist * self.args.final_step_gain))
-            elif mode == "PAD_CAPTURE":
-                max_step = min(max_step, max(self.args.min_step, current_pad_dist * self.args.capture_step_gain))
-            if mode in ("FINAL_DESCENT", "LAND_READY"):
-                step = min(max_step, dist)
-            elif current_pad_dist <= self.args.final_radius:
-                step = min(max(self.args.min_step, current_pad_dist * self.args.final_step_gain), dist)
-            else:
-                step = min(max_step, dist)
-            tx = self.drone["x"] + dx / dist * step
-            ty = self.drone["y"] + dy / dist * step
-        else:
-            tx = self.drone["x"]
-            ty = self.drone["y"]
-
-        if self.last_target_world is not None:
+        step_dist = math.hypot(dx, dy)
+        if self.last_target_world is not None and step_dist > 1.0e-6:
             a = clamp(self.args.xy_smoothing, 0.0, 1.0)
             if mode == "PAD_CAPTURE":
                 a = clamp(self.args.capture_xy_smoothing, 0.0, 1.0)
             elif mode in ("FINAL_DESCENT", "LAND_READY"):
                 a = clamp(self.args.final_xy_smoothing, 0.0, 1.0)
-            tx = (1.0 - a) * self.last_target_world[0] + a * tx
-            ty = (1.0 - a) * self.last_target_world[1] + a * ty
+            ux = dx / step_dist
+            uy = dy / step_dist
+            previous_progress = (
+                (self.last_target_world[0] - self.drone["x"]) * ux
+                + (self.last_target_world[1] - self.drone["y"]) * uy
+            )
+            requested_progress = (tx - self.drone["x"]) * ux + (ty - self.drone["y"]) * uy
+            progress = (1.0 - a) * clamp(previous_progress, 0.0, step_dist) + a * clamp(requested_progress, 0.0, step_dist)
+            tx = self.drone["x"] + ux * progress
+            ty = self.drone["y"] + uy * progress
 
         descent_rate = ontology["values"]["descentRate"]
         descent_start_radius = ontology["values"]["descentStartRadius"]
         center_ready = center_error <= self.args.centering_error_for_descent
         relative_speed_ready = relative_speed <= self.args.max_relative_speed_for_descent
+        terminal_centered = (
+            center_error <= self.args.direct_land_radius
+            and altitude_above_pad <= max(
+                self.args.direct_land_altitude_above_pad,
+                self.args.terminal_marker_prediction_altitude_above_pad,
+            )
+        )
+        if terminal_centered and relative_speed <= max(self.args.max_relative_speed_for_descent, self.args.direct_land_max_relative_speed):
+            center_ready = True
+            relative_speed_ready = True
         if mode in ("FINAL_DESCENT", "LAND_READY"):
             descent_rate = min(self.args.max_descent_rate_near, max(descent_rate, self.args.final_descent_rate))
         elif mode == "PAD_CAPTURE":
@@ -451,17 +449,29 @@ class RealtimeOntologyTrajectoryGenerator:
             touchdown_z = max(0.0, mz + self.args.terminal_touchdown_height_above_pad)
         else:
             touchdown_z = max(self.args.touchdown_altitude, mz + self.args.touchdown_height_above_pad)
-        if not center_ready or not relative_speed_ready:
+        hold_altitude_required = False
+        if (not center_ready or not relative_speed_ready) and not terminal_centered:
             descent_rate *= self.args.unsafe_descent_scale
             touchdown_z = max(touchdown_z, mz + self.args.centering_hold_height_above_pad)
-        target_z = max(touchdown_z, self.drone["z"] - descent_rate / max(self.args.rate, 1.0e-3))
+            hold_altitude_required = True
+        descent_lookahead = self.args.vertical_descent_lookahead
+        if mode in ("FINAL_DESCENT", "LAND_READY"):
+            descent_lookahead = max(descent_lookahead, self.args.terminal_vertical_descent_lookahead)
+        target_z = max(touchdown_z, self.drone["z"] - descent_rate * max(descent_lookahead, 0.0))
         if self.last_target_world is not None:
-            target_z = min(target_z, self.last_target_world[2])
+            if hold_altitude_required:
+                target_z = max(target_z, self.last_target_world[2])
+            else:
+                target_z = min(target_z, self.last_target_world[2])
 
         self.last_target_world = (tx, ty, target_z)
         north = ty - self.origin[1]
         east = tx - self.origin[0]
         z_up = max(0.0, target_z - self.z_offset)
+        destination_z = self.destination_altitude(mz)
+        dest_north = my - self.origin[1]
+        dest_east = mx - self.origin[0]
+        dest_z_up = max(0.0, destination_z - self.z_offset)
         cmd = self.compute_velocity_accel_command(
             ontology=ontology,
             mode=mode,
@@ -477,6 +487,8 @@ class RealtimeOntologyTrajectoryGenerator:
             relative_speed=relative_speed,
             center_ready=center_ready,
             relative_speed_ready=relative_speed_ready,
+            descent_rate=descent_rate,
+            guidance=guidance,
         )
 
         msg = PoseStamped()
@@ -492,12 +504,13 @@ class RealtimeOntologyTrajectoryGenerator:
         msg.pose.orientation.z = qz
         msg.pose.orientation.w = qw
         self.setpoint_pub.publish(msg)
+        self.publish_destination(dest_north, dest_east, dest_z_up)
         self.publish_velocity_accel_command(msg.header.stamp, cmd)
         self.setpoint_count += 1
 
         direct_land_ready = self.should_direct_land(now, current_pad_dist, mz, marker_speed, relative_speed)
         if direct_land_ready:
-            self.publish_land_request(current_pad_dist, mz)
+            self.handle_direct_touchdown_ready(current_pad_dist, mz)
 
         now = time.monotonic()
         if now - self.last_log_t >= self.args.log_period:
@@ -522,6 +535,7 @@ class RealtimeOntologyTrajectoryGenerator:
                 f"intercept_auth:{ontology['values']['interceptDistanceAuthority']:.2f}) "
                 f"center_ready={center_ready} rel_ready={relative_speed_ready} marker_age={marker_age:.2f} "
                 f"camera_marker_age={camera_marker_age:.2f} marker_source={self.marker_source} "
+                f"guidance_algorithm={guidance['algorithm']} reason={guidance['reason']} "
                 f"ontology=mode:{mode},intent:{ontology['values']['landingIntent']:.2f},"
                 f"risk:{ontology['values']['operationalRisk']:.2f},"
                 f"track:{ontology['values']['trackQuality']:.2f},"
@@ -530,6 +544,730 @@ class RealtimeOntologyTrajectoryGenerator:
             )
             self.last_log_t = now
 
+    def select_guidance_algorithm(
+        self,
+        now,
+        ontology,
+        marker,
+        current_pad_dist,
+        marker_age,
+        camera_marker_age,
+        altitude_above_pad,
+    ):
+        values = ontology["values"]
+        semantic = ontology["semantic"]
+        mode = values["guidanceMode"]
+        track_quality = values["trackQuality"]
+        operational_risk = values["operationalRisk"]
+        wind_risk = semantic["windRisk"]
+        visual_stability = semantic["visualStability"]
+        attitude_stability = semantic["attitudeStability"]
+        relative_motion_stability = semantic["relativeMotionStability"]
+        provider_confidence = semantic["providerConfidence"]
+        marker_speed = math.hypot(marker[3], marker[4])
+        relative_speed = semantic["relativeSpeed"]
+        close = 1.0 - clamp(current_pad_dist / max(self.args.pad_capture_radius, 1.0e-6), 0.0, 1.0)
+        far = clamp(
+            (current_pad_dist - self.args.pad_capture_radius)
+            / max(self.args.ontology_intercept_distance_reference - self.args.pad_capture_radius, 1.0e-6),
+            0.0,
+            1.0,
+        )
+        moving = clamp(marker_speed / max(self.args.ontology_platform_speed_reference, 1.0e-6), 0.0, 1.0)
+        relative_motion = clamp(relative_speed / max(self.args.ontology_relative_velocity_reference, 1.0e-6), 0.0, 1.0)
+        sensor_uncertainty = 1.0 - clamp(0.55 * track_quality + 0.45 * provider_confidence, 0.0, 1.0)
+        terminal = 1.0 if mode in ("FINAL_DESCENT", "LAND_READY") else 0.0
+        capture = 1.0 if mode == "PAD_CAPTURE" else 0.0
+        scores = {
+            "Vision_FOV_Constrained_Guidance": 0.30 + 0.35 * visual_stability + 0.20 * track_quality + 0.10 * capture + 0.05 * (1.0 - sensor_uncertainty),
+            "MPC_NMPC_Pad_Prediction_Tracking": 0.22 + 0.35 * track_quality + 0.20 * moving + 0.15 * far + 0.08 * relative_motion_stability - 0.15 * operational_risk,
+            "Receding_Horizon_Trajectory_Optimization_Robust_Guidance": 0.20 + 0.30 * max(wind_risk, operational_risk) + 0.20 * relative_motion + 0.15 * moving + 0.10 * sensor_uncertainty + 0.05 * (1.0 - terminal),
+        }
+        terminal_homing = clamp(
+            (self.args.pad_capture_radius - current_pad_dist)
+            / max(self.args.pad_capture_radius - self.args.final_descent_radius, 1.0e-6),
+            0.0,
+            1.0,
+        )
+        scores["Vision_FOV_Constrained_Guidance"] += 0.12 * terminal_homing
+        scores["MPC_NMPC_Pad_Prediction_Tracking"] += 0.10 * track_quality * moving
+        scores["Receding_Horizon_Trajectory_Optimization_Robust_Guidance"] += 0.15 * max(wind_risk, operational_risk)
+        if altitude_above_pad <= self.args.terminal_marker_prediction_altitude_above_pad:
+            scores["Vision_FOV_Constrained_Guidance"] += 0.08
+        if camera_marker_age <= self.args.camera_marker_guidance_timeout and self.marker_source == "camera":
+            scores["Vision_FOV_Constrained_Guidance"] += 0.08
+            scores["MPC_NMPC_Pad_Prediction_Tracking"] += 0.06
+        else:
+            scores["Receding_Horizon_Trajectory_Optimization_Robust_Guidance"] += 0.10
+
+        tuning_profiles = self.guidance_tuning_profiles(
+            ontology,
+            marker=marker,
+            current_pad_dist=current_pad_dist,
+            marker_age=marker_age,
+            camera_marker_age=camera_marker_age,
+            altitude_above_pad=altitude_above_pad,
+        )
+        algorithm = max(scores, key=scores.get)
+        selected_tuning = tuning_profiles.get(algorithm, {})
+        ontology["semantic"]["guidanceParameterProfiles"] = tuning_profiles
+        ontology["semantic"]["selectedGuidanceParameters"] = selected_tuning
+        solutions = {
+            "Vision_FOV_Constrained_Guidance": self.guidance_vision_fov_constrained,
+            "MPC_NMPC_Pad_Prediction_Tracking": self.guidance_mpc_nmpc_pad_prediction_tracking,
+            "Receding_Horizon_Trajectory_Optimization_Robust_Guidance": self.guidance_receding_horizon_robust,
+        }
+        solution = solutions[algorithm](now, ontology, marker, current_pad_dist, altitude_above_pad)
+        solution = self.apply_landing_endpoint_constraint(
+            solution,
+            ontology,
+            marker,
+            current_pad_dist,
+            altitude_above_pad,
+        )
+        solution["algorithm"] = algorithm
+        solution["scores"] = {name: round(value, 3) for name, value in scores.items()}
+        solution["tuning"] = selected_tuning
+        solution["reason"] = (
+            f"mode={mode}, track={track_quality:.2f}, visual={visual_stability:.2f}, "
+            f"risk={operational_risk:.2f}, wind={wind_risk:.2f}, moving={moving:.2f}"
+        )
+        return solution
+
+    def guidance_tuning_profiles(
+        self,
+        ontology,
+        marker,
+        current_pad_dist,
+        marker_age,
+        camera_marker_age,
+        altitude_above_pad,
+    ):
+        values = ontology["values"]
+        semantic = ontology["semantic"]
+        mode = values["guidanceMode"]
+        track_quality = values["trackQuality"]
+        operational_risk = values["operationalRisk"]
+        visual_stability = semantic["visualStability"]
+        wind_risk = semantic["windRisk"]
+        relative_motion = clamp(
+            semantic["relativeSpeed"] / max(self.args.ontology_relative_velocity_reference, 1.0e-6),
+            0.0,
+            1.0,
+        )
+        marker_speed = math.hypot(marker[3], marker[4])
+        moving = clamp(marker_speed / max(self.args.ontology_platform_speed_reference, 1.0e-6), 0.0, 1.0)
+        sensor_uncertainty = 1.0 - clamp(
+            0.55 * track_quality
+            + 0.30 * visual_stability
+            + 0.15 * semantic["providerConfidence"],
+            0.0,
+            1.0,
+        )
+        close = 1.0 - clamp(current_pad_dist / max(self.args.pad_capture_radius, 1.0e-6), 0.0, 1.0)
+        terminal = 1.0 if mode in ("FINAL_DESCENT", "LAND_READY") else 0.0
+        capture = 1.0 if mode == "PAD_CAPTURE" else 0.0
+        stale_camera = 1.0 if camera_marker_age > self.args.camera_marker_guidance_timeout else 0.0
+        age_risk = clamp(marker_age / max(self.args.marker_lost_timeout, 1.0e-6), 0.0, 1.0)
+        damping = clamp(
+            0.25 * operational_risk
+            + 0.25 * wind_risk
+            + 0.25 * relative_motion
+            + 0.15 * sensor_uncertainty
+            + 0.10 * close,
+            0.0,
+            1.0,
+        )
+        prediction_confidence = clamp(
+            0.50 * track_quality
+            + 0.25 * visual_stability
+            + 0.25 * (1.0 - age_risk),
+            0.0,
+            1.0,
+        )
+        horizon_scale = clamp(
+            0.45
+            + 0.75 * prediction_confidence
+            + 0.35 * moving
+            - 0.35 * terminal
+            - 0.25 * stale_camera,
+            0.25,
+            1.25,
+        )
+        speed_scale = clamp(1.0 - 0.45 * damping - 0.20 * terminal + 0.15 * moving, 0.30, 1.10)
+        accel_scale = clamp(1.0 - 0.35 * damping + 0.15 * moving - 0.20 * terminal, 0.35, 1.10)
+        wind_compensation = clamp(0.15 + 0.85 * wind_risk + 0.25 * sensor_uncertainty, 0.0, 1.0)
+        corridor_tightness = clamp(0.25 + 0.55 * operational_risk + 0.35 * close + 0.25 * terminal, 0.0, 1.0)
+
+        return {
+            "waypoint": {
+                "speed_scale": round(speed_scale, 3),
+                "lead_time": round(values["leadTime"] * horizon_scale, 3),
+            },
+            "pure_pursuit": {
+                "lookahead_gain": round(lerp(0.30, 0.55, prediction_confidence) * lerp(1.0, 0.65, close), 3),
+                "lookahead_min": round(lerp(0.25, 0.55, sensor_uncertainty), 3),
+                "marker_velocity_blend": round(lerp(0.10, 0.35, moving * prediction_confidence), 3),
+                "lateral_accel_gain": round(lerp(1.45, 2.35, track_quality) * lerp(1.0, 0.72, damping), 3),
+                "speed_scale": round(speed_scale, 3),
+            },
+            "los": {
+                "distance_scale": round(lerp(0.75, 1.05, visual_stability) * lerp(1.0, 0.65, close), 3),
+                "marker_velocity_blend": round(lerp(0.15, 0.40, moving * track_quality), 3),
+                "speed_scale": round(speed_scale, 3),
+            },
+            "l1": {
+                "distance_gain": round(lerp(0.42, 0.70, track_quality) * lerp(1.0, 0.72, close), 3),
+                "velocity_damping_time": round(lerp(0.18, 0.55, damping), 3),
+                "lateral_accel_gain": round(lerp(1.55, 2.35, track_quality) * lerp(1.0, 0.75, terminal), 3),
+                "speed_scale": round(speed_scale, 3),
+            },
+            "nlgl": {
+                "radius_gain": round(lerp(0.50, 0.82, prediction_confidence) * lerp(1.0, 0.68, close), 3),
+                "radius_offset": round(lerp(0.14, 0.32, sensor_uncertainty), 3),
+                "lateral_accel_gain": round(lerp(1.55, 2.25, track_quality) * lerp(1.0, 0.72, damping), 3),
+                "speed_scale": round(speed_scale, 3),
+            },
+            "vector_field": {
+                "wind_gain": round(lerp(0.10, 0.48, wind_compensation), 3),
+                "marker_velocity_blend": round(lerp(0.25, 0.55, moving * prediction_confidence), 3),
+                "tangent_max": round(lerp(0.18, 0.42, operational_risk) * lerp(1.0, 0.55, terminal), 3),
+                "speed_scale": round(speed_scale, 3),
+            },
+            "pn": {
+                "navigation_gain": round(lerp(2.0, 5.0, clamp(0.55 * moving + 0.45 * relative_motion, 0.0, 1.0)), 3),
+                "lead_closing_floor": round(lerp(0.25, 0.55, sensor_uncertainty), 3),
+                "accel_scale": round(accel_scale, 3),
+            },
+            "trajectory_shaping": {
+                "approach_time_scale": round(horizon_scale * lerp(0.65, 1.05, prediction_confidence), 3),
+                "preview_time": round(lerp(0.12, 0.40, 1.0 - terminal) * lerp(1.0, 0.70, damping), 3),
+                "accel_scale": round(accel_scale, 3),
+            },
+            "mpc": {
+                "horizon_scale": round(horizon_scale, 3),
+                "horizon_min": round(lerp(0.25, 0.65, sensor_uncertainty), 3),
+                "horizon_max": round(lerp(1.2, 2.4, prediction_confidence) * lerp(1.0, 0.55, terminal), 3),
+                "accel_scale": round(accel_scale, 3),
+            },
+            "nmpc": {
+                "horizon_scale": round(horizon_scale * lerp(0.85, 1.25, moving), 3),
+                "horizon_min": round(lerp(0.35, 0.75, sensor_uncertainty), 3),
+                "accel_scale": round(accel_scale, 3),
+            },
+            "nmpc_cbf": {
+                "horizon_scale": round(horizon_scale * lerp(0.85, 1.15, operational_risk), 3),
+                "barrier_weight": round(lerp(8.0, 18.0, corridor_tightness), 3),
+                "corridor_scale": round(lerp(0.35, 0.75, 1.0 - corridor_tightness), 3),
+                "accel_scale": round(clamp(accel_scale * lerp(0.65, 0.95, 1.0 - corridor_tightness), 0.25, 1.0), 3),
+            },
+            "impact_aware_mpc": {
+                "horizon_scale": round(clamp(horizon_scale * lerp(0.55, 0.95, 1.0 - terminal), 0.25, 1.0), 3),
+                "terminal_blend": round(lerp(0.25, 0.70, close + 0.5 * terminal), 3),
+                "impact_speed_floor": round(lerp(0.12, 0.28, altitude_above_pad / max(self.args.direct_land_altitude_above_pad, 1.0e-3)), 3),
+                "accel_scale": round(clamp(accel_scale * lerp(0.55, 0.90, 1.0 - terminal), 0.20, 1.0), 3),
+            },
+        }
+
+    def selected_guidance_tuning(self, ontology, algorithm):
+        profiles = ontology.get("semantic", {}).get("guidanceParameterProfiles", {})
+        return profiles.get(algorithm, {})
+
+    def apply_landing_endpoint_constraint(self, solution, ontology, marker, current_pad_dist, altitude_above_pad):
+        mode = ontology["values"]["guidanceMode"]
+        capture_blend = clamp(
+            (self.args.pad_capture_radius - current_pad_dist)
+            / max(self.args.pad_capture_radius - self.args.final_descent_radius, 1.0e-6),
+            0.0,
+            1.0,
+        )
+        altitude_blend = clamp(
+            (self.args.terminal_marker_prediction_altitude_above_pad - altitude_above_pad)
+            / max(self.args.terminal_marker_prediction_altitude_above_pad, 1.0e-6),
+            0.0,
+            1.0,
+        )
+        if mode in ("FINAL_DESCENT", "LAND_READY"):
+            endpoint_blend = 1.0
+        elif mode == "PAD_CAPTURE":
+            endpoint_blend = max(capture_blend, 0.50 * altitude_blend)
+        else:
+            endpoint_blend = 0.0
+        if endpoint_blend <= 0.0:
+            return solution
+
+        mx, my, mz, mvx, mvy = marker
+        dx = mx - self.drone["x"]
+        dy = my - self.drone["y"]
+        ux, uy, dist = self.unit_vector(dx, dy, 0.0, 0.0)
+        closure_speed = min(
+            ontology["values"]["velocityMaxSpeed"],
+            max(0.0, ontology["values"]["navigationGain"] * dist * 0.35),
+        )
+        if dist <= self.args.final_descent_radius:
+            closure_speed = min(closure_speed, max(self.args.ontology_min_velocity_speed, dist * 0.80))
+        desired_vx = mvx + ux * closure_speed
+        desired_vy = mvy + uy * closure_speed
+        center_lock_radius = min(0.05, max(0.01, 0.20 * self.args.direct_land_radius))
+        if dist <= center_lock_radius:
+            desired_vx = mvx
+            desired_vy = mvy
+
+        max_step = clamp(ontology["values"]["maxHorizontalStep"], self.args.min_step, self.args.max_step)
+        if mode in ("FINAL_DESCENT", "LAND_READY"):
+            max_step = min(max_step, max(self.args.min_step, dist * self.args.final_step_gain))
+        else:
+            max_step = min(max_step, max(self.args.min_step, dist * self.args.capture_step_gain))
+        step = min(max_step, dist)
+        setpoint_x = self.drone["x"] + ux * step if dist > 1.0e-6 else mx
+        setpoint_y = self.drone["y"] + uy * step if dist > 1.0e-6 else my
+
+        solution["aim_x"] = lerp(solution["aim_x"], mx, endpoint_blend)
+        solution["aim_y"] = lerp(solution["aim_y"], my, endpoint_blend)
+        solution["setpoint_x"] = lerp(solution["setpoint_x"], setpoint_x, endpoint_blend)
+        solution["setpoint_y"] = lerp(solution["setpoint_y"], setpoint_y, endpoint_blend)
+        solution["desired_vx"] = lerp(solution["desired_vx"], desired_vx, endpoint_blend)
+        solution["desired_vy"] = lerp(solution["desired_vy"], desired_vy, endpoint_blend)
+        ax = ontology["values"]["accelKp"] * (solution["desired_vx"] - self.drone["vx"])
+        ay = ontology["values"]["accelKp"] * (solution["desired_vy"] - self.drone["vy"])
+        solution["desired_ax"] = lerp(solution["desired_ax"], ax, endpoint_blend)
+        solution["desired_ay"] = lerp(solution["desired_ay"], ay, endpoint_blend)
+        solution["allow_cross_track_velocity"] = endpoint_blend < 0.95 and solution.get("allow_cross_track_velocity", False)
+        solution["endpoint_constraint_blend"] = endpoint_blend
+        return solution
+
+    def base_guidance_solution(self, now, ontology, marker, aim_x, aim_y, desired_vx=None, desired_vy=None, ax=0.0, ay=0.0, **extra):
+        values = ontology["values"]
+        dx = aim_x - self.drone["x"]
+        dy = aim_y - self.drone["y"]
+        dist = math.hypot(dx, dy)
+        if dist > 1.0e-6:
+            max_step = clamp(values["maxHorizontalStep"], self.args.min_step, self.args.max_step)
+            mode = values["guidanceMode"]
+            if mode in ("FINAL_DESCENT", "LAND_READY"):
+                max_step = min(max_step, max(self.args.min_step, dist * self.args.final_step_gain))
+            elif mode == "PAD_CAPTURE":
+                max_step = min(max_step, max(self.args.min_step, dist * self.args.capture_step_gain))
+            step = min(max_step, dist)
+            setpoint_x = self.drone["x"] + dx / dist * step
+            setpoint_y = self.drone["y"] + dy / dist * step
+        else:
+            setpoint_x = self.drone["x"]
+            setpoint_y = self.drone["y"]
+        if desired_vx is None or desired_vy is None:
+            speed = min(values["velocityMaxSpeed"], max(self.args.ontology_min_velocity_speed, values["navigationGain"] * dist * 0.25))
+            desired_vx = 0.0 if dist <= 1.0e-6 else dx / dist * speed
+            desired_vy = 0.0 if dist <= 1.0e-6 else dy / dist * speed
+        desired_vx, desired_vy = limit_vector(desired_vx, desired_vy, values["velocityMaxSpeed"])
+        ax, ay = limit_vector(ax, ay, values["accelMax"])
+        solution = {
+            "aim_x": aim_x,
+            "aim_y": aim_y,
+            "setpoint_x": setpoint_x,
+            "setpoint_y": setpoint_y,
+            "desired_vx": desired_vx,
+            "desired_vy": desired_vy,
+            "desired_ax": ax,
+            "desired_ay": ay,
+            "lead_time": extra.pop("lead_time", 0.0),
+            "intercept_lead": extra.pop("intercept_lead", 0.0),
+            "future_time": extra.pop("future_time", 0.0),
+            "corridor_offset": extra.pop("corridor_offset", 0.0),
+            "corridor_limit": extra.pop("corridor_limit", 0.0),
+            "descent_center_time": extra.pop("descent_center_time", 0.0),
+            "terminal_prediction_time": extra.pop("terminal_prediction_time", 0.0),
+            "terminal_inertia_time": extra.pop("terminal_inertia_time", 0.0),
+        }
+        solution.update(extra)
+        return solution
+
+    def marker_center_solution(self, now, ontology, marker, lead_time=0.0):
+        px, py, pz, pvx, pvy, _ = self.predicted_marker_state(now, lead_time)
+        return px, py, pvx, pvy
+
+    def guidance_speed(self, ontology, distance, scale=1.0):
+        values = ontology["values"]
+        proportional = values["navigationGain"] * max(distance, 0.0) * 0.25
+        speed = clamp(
+            proportional,
+            self.args.ontology_min_velocity_speed,
+            values["velocityMaxSpeed"],
+        )
+        return clamp(speed * scale, 0.0, values["velocityMaxSpeed"])
+
+    def unit_vector(self, x, y, fallback_x=1.0, fallback_y=0.0):
+        norm = math.hypot(x, y)
+        if norm <= 1.0e-9:
+            return fallback_x, fallback_y, 0.0
+        return x / norm, y / norm, norm
+
+    def current_velocity_heading(self, fallback_heading=0.0):
+        speed = math.hypot(self.drone["vx"], self.drone["vy"])
+        if speed > 0.05:
+            return math.atan2(self.drone["vy"], self.drone["vx"])
+        return fallback_heading
+
+    def guidance_vision_fov_constrained(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        return self.guidance_los(now, ontology, marker, current_pad_dist, altitude_above_pad)
+
+    def guidance_mpc_nmpc_pad_prediction_tracking(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        return self.guidance_mpc(now, ontology, marker, current_pad_dist, altitude_above_pad)
+
+    def guidance_receding_horizon_robust(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        return self.guidance_vector_field(now, ontology, marker, current_pad_dist, altitude_above_pad)
+
+    def cubic_terminal_command(self, target_x, target_y, target_vx, target_vy, horizon):
+        horizon = max(horizon, 0.10)
+        p0x = self.drone["x"]
+        p0y = self.drone["y"]
+        v0x = self.drone["vx"]
+        v0y = self.drone["vy"]
+        ax = 6.0 * (target_x - p0x) / (horizon * horizon) - 2.0 * (2.0 * v0x + target_vx) / horizon
+        ay = 6.0 * (target_y - p0y) / (horizon * horizon) - 2.0 * (2.0 * v0y + target_vy) / horizon
+        desired_vx = v0x + ax * min(0.35, horizon)
+        desired_vy = v0y + ay * min(0.35, horizon)
+        return desired_vx, desired_vy, ax, ay
+
+    def predictive_accel_search(
+        self,
+        now,
+        ontology,
+        horizon,
+        nonlinear=False,
+        barrier=False,
+        impact=False,
+        altitude_above_pad=0.0,
+        barrier_weight=12.0,
+        impact_weight=8.0,
+    ):
+        values = ontology["values"]
+        horizon = clamp(horizon, 0.25, self.args.prediction_horizon)
+        accel_limit = max(values["accelMax"], self.args.ontology_min_accel)
+        speed_limit = max(values["velocityMaxSpeed"], self.args.ontology_min_velocity_speed)
+        target_x, target_y, _, target_vx, target_vy, _ = self.predicted_marker_state(now, horizon)
+        candidates = [
+            (0.0, 0.0),
+            (accel_limit, 0.0),
+            (-accel_limit, 0.0),
+            (0.0, accel_limit),
+            (0.0, -accel_limit),
+        ]
+        diagonal = accel_limit / math.sqrt(2.0)
+        candidates.extend([
+            (diagonal, diagonal),
+            (diagonal, -diagonal),
+            (-diagonal, diagonal),
+            (-diagonal, -diagonal),
+        ])
+        if nonlinear:
+            ex = target_x - self.drone["x"]
+            ey = target_y - self.drone["y"]
+            ux, uy, _ = self.unit_vector(ex, ey)
+            candidates.extend([
+                (ux * accel_limit, uy * accel_limit),
+                (ux * accel_limit - uy * 0.5 * accel_limit, uy * accel_limit + ux * 0.5 * accel_limit),
+                (ux * accel_limit + uy * 0.5 * accel_limit, uy * accel_limit - ux * 0.5 * accel_limit),
+            ])
+
+        best_cost = float("inf")
+        best = (0.0, 0.0, self.drone["vx"], self.drone["vy"])
+        for ax, ay in candidates:
+            vx = self.drone["vx"] + ax * horizon
+            vy = self.drone["vy"] + ay * horizon
+            vx, vy = limit_vector(vx, vy, speed_limit)
+            px = self.drone["x"] + self.drone["vx"] * horizon + 0.5 * ax * horizon * horizon
+            py = self.drone["y"] + self.drone["vy"] * horizon + 0.5 * ay * horizon * horizon
+            ex = px - target_x
+            ey = py - target_y
+            evx = vx - target_vx
+            evy = vy - target_vy
+            cost = 3.0 * (ex * ex + ey * ey) + 0.9 * (evx * evx + evy * evy) + 0.08 * (ax * ax + ay * ay)
+            if barrier:
+                corridor = max(self.args.direct_land_radius, min(self.args.pad_capture_radius, max(0.35, 0.65 * horizon)))
+                violation = max(0.0, math.hypot(ex, ey) - corridor)
+                cost += barrier_weight * violation * violation
+            if impact:
+                terminal_speed = math.hypot(evx, evy)
+                impact_blend = clamp(1.0 - altitude_above_pad / max(self.args.terminal_marker_prediction_altitude_above_pad, 1.0e-3), 0.0, 1.0)
+                cost += impact_weight * impact_blend * terminal_speed * terminal_speed
+            if cost < best_cost:
+                best_cost = cost
+                best = (ax, ay, vx, vy)
+        ax, ay, desired_vx, desired_vy = best
+        return target_x, target_y, desired_vx, desired_vy, ax, ay, horizon, best_cost
+
+    def guidance_waypoint(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "waypoint")
+        mx, my, _, _, _, _ = self.predicted_marker_state(now, 0.0)
+        ex = mx - self.drone["x"]
+        ey = my - self.drone["y"]
+        ux, uy, dist = self.unit_vector(ex, ey)
+        speed = self.guidance_speed(ontology, dist, tuning.get("speed_scale", 1.0))
+        return self.base_guidance_solution(now, ontology, marker, mx, my, ux * speed, uy * speed)
+
+    def guidance_pure_pursuit(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "pure_pursuit")
+        lookahead_gain = tuning.get("lookahead_gain", 0.45)
+        lookahead_min = tuning.get("lookahead_min", 0.35)
+        lookahead = clamp(lookahead_gain * current_pad_dist + lookahead_min, self.args.min_step, self.args.max_step)
+        lead_time = lookahead / max(ontology["values"]["velocityMaxSpeed"], 0.25)
+        target_x, target_y, mvx, mvy = self.marker_center_solution(now, ontology, marker, lead_time)
+        ux, uy, dist = self.unit_vector(target_x - self.drone["x"], target_y - self.drone["y"])
+        carrot_dist = min(lookahead, dist)
+        aim_x = self.drone["x"] + ux * carrot_dist
+        aim_y = self.drone["y"] + uy * carrot_dist
+        path_heading = math.atan2(uy, ux)
+        alpha = wrap_pi(path_heading - self.drone.get("yaw", self.current_velocity_heading(path_heading)))
+        speed = self.guidance_speed(ontology, dist, tuning.get("speed_scale", 1.0))
+        lateral_accel = tuning.get("lateral_accel_gain", 2.0) * speed * speed * math.sin(alpha) / max(lookahead, self.args.min_step)
+        ax = -uy * lateral_accel
+        ay = ux * lateral_accel
+        marker_blend = tuning.get("marker_velocity_blend", 0.20)
+        desired_vx = ux * speed + marker_blend * mvx
+        desired_vy = uy * speed + marker_blend * mvy
+        return self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy, ax, ay, lead_time=lead_time, future_time=lead_time)
+
+    def guidance_los(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "los")
+        mx, my, _, mvx, mvy, _ = self.predicted_marker_state(now, 0.0)
+        ux, uy, dist = self.unit_vector(mx - self.drone["x"], my - self.drone["y"])
+        los_distance = clamp(dist * tuning.get("distance_scale", 1.0), self.args.min_step, self.args.max_step)
+        aim_x = self.drone["x"] + ux * min(los_distance, dist)
+        aim_y = self.drone["y"] + uy * min(los_distance, dist)
+        speed = self.guidance_speed(ontology, dist, tuning.get("speed_scale", 1.0))
+        marker_blend = tuning.get("marker_velocity_blend", 0.25)
+        desired_vx = ux * speed + marker_blend * mvx
+        desired_vy = uy * speed + marker_blend * mvy
+        return self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy)
+
+    def guidance_l1(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "l1")
+        speed = max(math.hypot(self.drone["vx"], self.drone["vy"]), self.guidance_speed(ontology, current_pad_dist, tuning.get("speed_scale", 1.0)))
+        l1_distance = clamp(
+            speed * tuning.get("velocity_damping_time", self.args.intercept_velocity_damping_time)
+            + tuning.get("distance_gain", 0.55) * current_pad_dist,
+            self.args.min_step,
+            self.args.max_step,
+        )
+        lead_time = clamp(l1_distance / max(speed, 0.25), 0.0, self.args.prediction_horizon)
+        target_x, target_y, _, _ = self.marker_center_solution(now, ontology, marker, lead_time)
+        ux, uy, dist = self.unit_vector(target_x - self.drone["x"], target_y - self.drone["y"])
+        aim_x = self.drone["x"] + ux * min(l1_distance, dist)
+        aim_y = self.drone["y"] + uy * min(l1_distance, dist)
+        path_heading = math.atan2(uy, ux)
+        velocity_heading = math.atan2(self.drone["vy"], self.drone["vx"]) if math.hypot(self.drone["vx"], self.drone["vy"]) > 0.05 else path_heading
+        eta = wrap_pi(path_heading - velocity_heading)
+        lateral_accel = tuning.get("lateral_accel_gain", 2.0) * speed * speed * math.sin(eta) / max(l1_distance, self.args.min_step)
+        ax = -uy * lateral_accel
+        ay = ux * lateral_accel
+        desired_vx = ux * self.guidance_speed(ontology, dist, tuning.get("speed_scale", 1.0))
+        desired_vy = uy * self.guidance_speed(ontology, dist, tuning.get("speed_scale", 1.0))
+        return self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy, ax, ay, lead_time=lead_time, future_time=lead_time, allow_cross_track_velocity=True)
+
+    def guidance_nlgl(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "nlgl")
+        radius = clamp(
+            tuning.get("radius_gain", 0.70) * current_pad_dist + tuning.get("radius_offset", 0.20),
+            self.args.min_step,
+            self.args.max_step,
+        )
+        lead_time = radius / max(ontology["values"]["velocityMaxSpeed"], 0.25)
+        target_x, target_y, _, _ = self.marker_center_solution(now, ontology, marker, lead_time)
+        ux, uy, dist = self.unit_vector(target_x - self.drone["x"], target_y - self.drone["y"])
+        aim_x = self.drone["x"] + ux * min(radius, dist)
+        aim_y = self.drone["y"] + uy * min(radius, dist)
+        desired_heading = math.atan2(uy, ux)
+        velocity_heading = self.current_velocity_heading(desired_heading)
+        eta = wrap_pi(desired_heading - velocity_heading)
+        speed = self.guidance_speed(ontology, dist, tuning.get("speed_scale", 1.0))
+        lateral_accel = tuning.get("lateral_accel_gain", 2.0) * speed * speed * math.sin(eta) / max(radius, self.args.min_step)
+        ax = -uy * lateral_accel
+        ay = ux * lateral_accel
+        desired_vx = ux * speed
+        desired_vy = uy * speed
+        return self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy, ax, ay, lead_time=lead_time, future_time=lead_time, allow_cross_track_velocity=True)
+
+    def guidance_vector_field(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "vector_field")
+        mx, my, _, mvx, mvy, _ = self.predicted_marker_state(now, 0.0)
+        ux, uy, dist = self.unit_vector(mx - self.drone["x"], my - self.drone["y"])
+        wind_x = self.wind["x"] if self.current_wind_speed(now) > 0.0 else 0.0
+        wind_y = self.wind["y"] if self.current_wind_speed(now) > 0.0 else 0.0
+        speed = self.guidance_speed(ontology, dist, tuning.get("speed_scale", 1.0))
+        attractive_x = ux * speed
+        attractive_y = uy * speed
+        tangent_scale = clamp(
+            (dist - self.args.final_descent_radius) / max(self.args.pad_capture_radius, 1.0e-6),
+            0.0,
+            tuning.get("tangent_max", 0.35),
+        )
+        tangent_x = -uy * tangent_scale * speed
+        tangent_y = ux * tangent_scale * speed
+        marker_blend = tuning.get("marker_velocity_blend", 0.45)
+        wind_gain = tuning.get("wind_gain", 0.30)
+        desired_vx = attractive_x + tangent_x + marker_blend * mvx - wind_gain * wind_x
+        desired_vy = attractive_y + tangent_y + marker_blend * mvy - wind_gain * wind_y
+        ax = ontology["values"]["accelKp"] * (desired_vx - self.drone["vx"])
+        ay = ontology["values"]["accelKp"] * (desired_vy - self.drone["vy"])
+        return self.base_guidance_solution(now, ontology, marker, mx, my, desired_vx, desired_vy, ax, ay, allow_cross_track_velocity=True)
+
+    def guidance_pn(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "pn")
+        mx, my, _, mvx, mvy, _ = self.predicted_marker_state(now, 0.0)
+        rx = mx - self.drone["x"]
+        ry = my - self.drone["y"]
+        rvx = mvx - self.drone["vx"]
+        rvy = mvy - self.drone["vy"]
+        r2 = max(rx * rx + ry * ry, 1.0e-6)
+        los_rate = (rx * rvy - ry * rvx) / r2
+        closing = max(0.0, -(rx * rvx + ry * rvy) / math.sqrt(r2))
+        nav_gain = clamp(tuning.get("navigation_gain", ontology["values"]["navigationGain"]), 2.0, 5.0)
+        lateral_accel = tuning.get("accel_scale", 1.0) * nav_gain * closing * los_rate
+        dist = math.sqrt(r2)
+        ux = rx / dist
+        uy = ry / dist
+        ax = -uy * lateral_accel
+        ay = ux * lateral_accel
+        lead_time = clamp(current_pad_dist / max(closing, tuning.get("lead_closing_floor", 0.35)), 0.0, self.args.prediction_horizon)
+        aim_x, aim_y, _, _ = self.marker_center_solution(now, ontology, marker, lead_time)
+        desired_vx = self.drone["vx"] + ax * min(0.35, lead_time)
+        desired_vy = self.drone["vy"] + ay * min(0.35, lead_time)
+        return self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy, ax, ay, lead_time=lead_time, future_time=lead_time, los_rate=los_rate, closing_speed=closing, allow_cross_track_velocity=True)
+
+    def guidance_trajectory_shaping(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "trajectory_shaping")
+        approach_time = clamp(
+            tuning.get("approach_time_scale", 1.0) * altitude_above_pad / max(ontology["values"]["descentRate"], 0.10),
+            0.0,
+            self.args.prediction_horizon,
+        )
+        target_x, target_y, target_vx, target_vy = self.marker_center_solution(now, ontology, marker, approach_time)
+        desired_vx, desired_vy, ax, ay = self.cubic_terminal_command(target_x, target_y, target_vx, target_vy, approach_time)
+        accel_scale = tuning.get("accel_scale", 1.0)
+        ax *= accel_scale
+        ay *= accel_scale
+        preview_t = min(tuning.get("preview_time", 0.35), max(0.10, approach_time))
+        aim_x = self.drone["x"] + self.drone["vx"] * preview_t + 0.5 * ax * preview_t * preview_t
+        aim_y = self.drone["y"] + self.drone["vy"] * preview_t + 0.5 * ay * preview_t * preview_t
+        return self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy, ax, ay, lead_time=preview_t, future_time=approach_time, allow_cross_track_velocity=True)
+
+    def guidance_mpc(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "mpc")
+        horizon = clamp(
+            tuning.get("horizon_scale", 1.0) * current_pad_dist / max(ontology["values"]["velocityMaxSpeed"], 0.25),
+            tuning.get("horizon_min", 0.4),
+            tuning.get("horizon_max", 2.0),
+        )
+        aim_x, aim_y, desired_vx, desired_vy, ax, ay, horizon, cost = self.predictive_accel_search(now, ontology, horizon)
+        ax *= tuning.get("accel_scale", 1.0)
+        ay *= tuning.get("accel_scale", 1.0)
+        return self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy, ax, ay, lead_time=horizon, future_time=horizon, objective_cost=cost, allow_cross_track_velocity=True)
+
+    def guidance_nmpc(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "nmpc")
+        horizon = clamp(
+            tuning.get("horizon_scale", 1.0) * altitude_above_pad / max(ontology["values"]["descentRate"], 0.10),
+            tuning.get("horizon_min", 0.5),
+            self.args.prediction_horizon,
+        )
+        aim_x, aim_y, desired_vx, desired_vy, ax, ay, horizon, cost = self.predictive_accel_search(now, ontology, horizon, nonlinear=True)
+        ax *= tuning.get("accel_scale", 1.0)
+        ay *= tuning.get("accel_scale", 1.0)
+        return self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy, ax, ay, lead_time=horizon, future_time=horizon, objective_cost=cost, allow_cross_track_velocity=True)
+
+    def guidance_nmpc_cbf(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "nmpc_cbf")
+        horizon = clamp(
+            tuning.get("horizon_scale", 1.0) * altitude_above_pad / max(ontology["values"]["descentRate"], 0.10),
+            0.5,
+            self.args.prediction_horizon,
+        )
+        aim_x, aim_y, desired_vx, desired_vy, ax, ay, horizon, cost = self.predictive_accel_search(
+            now,
+            ontology,
+            horizon,
+            nonlinear=True,
+            barrier=True,
+            barrier_weight=tuning.get("barrier_weight", 12.0),
+        )
+        sol = self.base_guidance_solution(now, ontology, marker, aim_x, aim_y, desired_vx, desired_vy, ax, ay, lead_time=horizon, future_time=horizon, objective_cost=cost, allow_cross_track_velocity=True)
+        safe_speed = lerp(self.args.ontology_min_velocity_speed, ontology["values"]["velocityMaxSpeed"], clamp(current_pad_dist / max(self.args.pad_capture_radius, 1.0e-6), 0.15, 1.0))
+        sol["desired_vx"], sol["desired_vy"] = limit_vector(sol["desired_vx"], sol["desired_vy"], safe_speed)
+        sol["desired_ax"], sol["desired_ay"] = limit_vector(
+            sol["desired_ax"] * tuning.get("accel_scale", 0.75),
+            sol["desired_ay"] * tuning.get("accel_scale", 0.75),
+            0.75 * ontology["values"]["accelMax"],
+        )
+        sol["corridor_limit"] = max(
+            self.args.min_step,
+            min(self.args.capture_center_corridor_radius, tuning.get("corridor_scale", 0.5) * max(current_pad_dist, self.args.min_step)),
+        )
+        offset_x = sol["aim_x"] - marker[0]
+        offset_y = sol["aim_y"] - marker[1]
+        offset = math.hypot(offset_x, offset_y)
+        sol["corridor_offset"] = offset
+        if offset > sol["corridor_limit"] > 0.0:
+            sol["aim_x"] = marker[0] + offset_x / offset * sol["corridor_limit"]
+            sol["aim_y"] = marker[1] + offset_y / offset * sol["corridor_limit"]
+        return sol
+
+    def guidance_impact_aware_mpc(self, now, ontology, marker, current_pad_dist, altitude_above_pad):
+        tuning = self.selected_guidance_tuning(ontology, "impact_aware_mpc")
+        terminal = self.terminal_landing_solution(now, marker[2], descent_rate=ontology["values"]["descentRate"])
+        horizon = terminal["prediction_time"] * tuning.get("horizon_scale", 1.0)
+        aim_x, aim_y, desired_vx, desired_vy, ax, ay, _, cost = self.predictive_accel_search(
+            now,
+            ontology,
+            horizon,
+            nonlinear=True,
+            barrier=True,
+            impact=True,
+            altitude_above_pad=altitude_above_pad,
+            barrier_weight=lerp(8.0, 16.0, tuning.get("terminal_blend", 0.35)),
+            impact_weight=lerp(6.0, 14.0, tuning.get("terminal_blend", 0.35)),
+        )
+        terminal_blend = tuning.get("terminal_blend", 0.35)
+        aim_x = lerp(aim_x, terminal["aim_x"], terminal_blend)
+        aim_y = lerp(aim_y, terminal["aim_y"], terminal_blend)
+        impact_scale = clamp(
+            altitude_above_pad / max(self.args.direct_land_altitude_above_pad, 1.0e-3),
+            tuning.get("impact_speed_floor", 0.20),
+            1.0,
+        )
+        desired_vx *= impact_scale
+        desired_vy *= impact_scale
+        ax *= impact_scale * tuning.get("accel_scale", 1.0)
+        ay *= impact_scale * tuning.get("accel_scale", 1.0)
+        return self.base_guidance_solution(
+            now,
+            ontology,
+            marker,
+            aim_x,
+            aim_y,
+            desired_vx,
+            desired_vy,
+            ax,
+            ay,
+            terminal_prediction_time=terminal["prediction_time"],
+            terminal_inertia_time=terminal["inertia_time"],
+            future_time=terminal["prediction_time"],
+            objective_cost=cost,
+            allow_cross_track_velocity=True,
+        )
+
+    def destination_altitude(self, pad_z):
+        return max(0.0, pad_z + self.args.terminal_touchdown_height_above_pad)
+
+    def publish_destination(self, north, east, z_up):
+        msg = PoseStamped()
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.header.frame_id = "local_ned"
+        msg.pose.position.x = float(north)
+        msg.pose.position.y = float(east)
+        msg.pose.position.z = float(z_up)
+        msg.pose.orientation.w = 1.0
+        self.destination_pub.publish(msg)
+
     def should_direct_land(self, now, dist, pad_z, marker_speed, relative_speed):
         altitude_above_pad = self.drone["z"] - pad_z
         horizontal_speed = math.hypot(self.drone["vx"], self.drone["vy"])
@@ -537,6 +1275,13 @@ class RealtimeOntologyTrajectoryGenerator:
         low_enough = altitude_above_pad <= self.args.direct_land_altitude_above_pad
         slow_enough = horizontal_speed <= self.args.direct_land_max_horizontal_speed
         relative_slow_enough = relative_speed <= self.args.direct_land_max_relative_speed
+        terminal_centered = (
+            dist <= min(self.args.direct_land_radius, 0.25)
+            and altitude_above_pad <= max(self.args.direct_land_altitude_above_pad, 0.55)
+        )
+        if terminal_centered:
+            slow_enough = horizontal_speed <= max(self.args.direct_land_max_horizontal_speed, 1.50)
+            relative_slow_enough = relative_speed <= max(self.args.direct_land_max_relative_speed, 1.60)
         marker_speed_ok = marker_speed >= self.args.direct_land_min_marker_speed
         if aligned and low_enough and slow_enough and relative_slow_enough and marker_speed_ok:
             if self.direct_land_since is None:
@@ -666,6 +1411,8 @@ class RealtimeOntologyTrajectoryGenerator:
         relative_speed,
         center_ready,
         relative_speed_ready,
+        descent_rate,
+        guidance=None,
     ):
         final_mode = mode in ("FINAL_DESCENT", "LAND_READY")
         ex = aim_x - self.drone["x"]
@@ -706,6 +1453,16 @@ class RealtimeOntologyTrajectoryGenerator:
 
         desired_vx = marker_vx + crossing_vx + kp * ex - kd * rel_vx
         desired_vy = marker_vy + crossing_vy + kp * ey - kd * rel_vy
+        if guidance is not None:
+            desired_vx = 0.35 * desired_vx + 0.65 * guidance.get("desired_vx", desired_vx)
+            desired_vy = 0.35 * desired_vy + 0.65 * guidance.get("desired_vy", desired_vy)
+        preserve_cross_track = guidance is not None and guidance.get("allow_cross_track_velocity", False)
+        if aim_dist > 1.0e-6 and not preserve_cross_track:
+            ux = ex / aim_dist
+            uy = ey / aim_dist
+            centerline_speed = desired_vx * ux + desired_vy * uy
+            desired_vx = ux * max(0.0, centerline_speed)
+            desired_vy = uy * max(0.0, centerline_speed)
         desired_vx, desired_vy = limit_vector(desired_vx, desired_vy, max_speed)
 
         if final_mode and not (center_ready and relative_speed_ready):
@@ -730,6 +1487,12 @@ class RealtimeOntologyTrajectoryGenerator:
             -values["verticalMaxDown"],
             self.args.vertical_velocity_control_max_up,
         )
+        if final_mode and center_ready and relative_speed_ready and altitude_above_pad > self.args.terminal_touchdown_height_above_pad + 0.03:
+            terminal_descent = min(
+                values["verticalMaxDown"],
+                max(self.args.terminal_min_descent_rate, descent_rate),
+            )
+            vz_up = min(vz_up, -terminal_descent)
         if final_mode and not (center_ready and relative_speed_ready):
             vz_up = max(vz_up, -values["verticalMaxDown"] * self.args.unsafe_descent_scale)
 
@@ -747,6 +1510,9 @@ class RealtimeOntologyTrajectoryGenerator:
             - self.args.accel_control_inertia_gain * self.drone.get("ay", 0.0)
             - self.args.accel_control_wind_gain * wind_y
         )
+        if guidance is not None:
+            ax_cmd += 0.45 * guidance.get("desired_ax", 0.0)
+            ay_cmd += 0.45 * guidance.get("desired_ay", 0.0)
         brake_gain = self.args.relative_motion_command_brake_gain * terminal_relative_motion_risk
         ax_cmd -= brake_gain * rel_vx
         ay_cmd -= brake_gain * rel_vy
@@ -756,6 +1522,8 @@ class RealtimeOntologyTrajectoryGenerator:
         )
         max_accel = max(values["accelMax"], moving_pad_accel_floor)
         ax_cmd, ay_cmd = limit_vector(ax_cmd, ay_cmd, max_accel)
+        ax_cmd = self.prevent_opposing_accel(desired_vx, ax_cmd, self.args.opposing_accel_velocity_deadband)
+        ay_cmd = self.prevent_opposing_accel(desired_vy, ay_cmd, self.args.opposing_accel_velocity_deadband)
         az_up_cmd = clamp(
             self.args.accel_control_vertical_gain * (vz_up - self.drone["vz"])
             - self.args.accel_control_inertia_gain * self.drone.get("az", 0.0),
@@ -776,6 +1544,14 @@ class RealtimeOntologyTrajectoryGenerator:
             "terminal_relative_motion_risk": terminal_relative_motion_risk,
             "center_crossing_speed": values["centerCrossingSpeed"],
         }
+
+    @staticmethod
+    def prevent_opposing_accel(desired_velocity, accel_command, velocity_deadband):
+        if abs(desired_velocity) <= max(0.0, velocity_deadband):
+            return accel_command
+        if desired_velocity * accel_command < 0.0:
+            return 0.0
+        return accel_command
 
     def publish_velocity_accel_command(self, stamp, cmd):
         vel = TwistStamped()
@@ -837,10 +1613,28 @@ class RealtimeOntologyTrajectoryGenerator:
         self.node.get_logger().warn(
             f"terminal marker loss while landing: pad_dist={pad_dist:.2f}, "
             f"altitude_above_pad={altitude_above_pad:.2f}, marker_age={marker_age:.2f}, "
-            f"camera_marker_age={camera_marker_age:.2f}; committing to LAND"
+            f"camera_marker_age={camera_marker_age:.2f}; terminal touchdown-ready"
         )
-        self.publish_land_request(pad_dist, mz)
-        return True
+        if self.args.publish_land_on_direct_ready:
+            self.publish_land_request(pad_dist, mz)
+            return True
+        return False
+
+    def handle_direct_touchdown_ready(self, dist, pad_z):
+        self.direct_touchdown_ready = True
+        if self.args.publish_land_on_direct_ready:
+            self.publish_land_request(dist, pad_z)
+            return
+        now = time.monotonic()
+        if now - self.last_direct_ready_log_t >= 0.5:
+            altitude_above_pad = self.drone["z"] - pad_z
+            self.node.get_logger().warn(
+                f"touchdown-ready while tracking moving pad: dist={dist:.2f}, "
+                f"altitude_above_pad={altitude_above_pad:.2f}, "
+                f"stable_time={self.args.direct_land_stable_time:.2f}; "
+                f"holding GUIDED setpoint control until /landing_marker/touchdown"
+            )
+            self.last_direct_ready_log_t = now
 
     def publish_land_request(self, dist, pad_z):
         msg = Bool()
@@ -918,7 +1712,7 @@ class RealtimeOntologyTrajectoryGenerator:
             return float(self.drone.get("yaw", 0.0))
         return math.atan2(step_east, step_north)
 
-    def update_marker_ekf(self, now, marker):
+    def update_marker_ekf(self, now, marker, source=None, previous_source=None):
         meas = [
             marker["x"],
             marker["y"],
@@ -940,6 +1734,12 @@ class RealtimeOntologyTrajectoryGenerator:
 
         pos_alpha = clamp(self.args.ekf_position_gain, 0.0, 1.0)
         vel_alpha = clamp(self.args.ekf_velocity_gain, 0.0, 1.0)
+        if source == "camera":
+            pos_alpha = min(pos_alpha, 0.25)
+            vel_alpha = min(vel_alpha, 0.12)
+        if source == "camera" and previous_source not in (None, "camera", "none"):
+            pos_alpha = min(pos_alpha, 0.12)
+            vel_alpha = min(vel_alpha, 0.06)
         self.ekf_state = [
             pred[0] + pos_alpha * (meas[0] - pred[0]),
             pred[1] + pos_alpha * (meas[1] - pred[1]),
@@ -1395,6 +2195,7 @@ def main():
     parser.add_argument("--visible-topic", default="/landing_marker/visible")
     parser.add_argument("--wind-topic", default="/iris/wind_world")
     parser.add_argument("--setpoint-topic", default="/obdm/guidance_setpoint")
+    parser.add_argument("--destination-topic", default="/obdm/guidance_destination")
     parser.add_argument("--velocity-topic", default="/obdm/guidance_velocity")
     parser.add_argument("--accel-topic", default="/obdm/guidance_accel")
     parser.add_argument("--land-topic", default="/obdm/guidance_land")
@@ -1422,12 +2223,13 @@ def main():
     parser.add_argument("--far-descent-scale", type=float, default=0.35)
     parser.add_argument("--descent-start-radius", type=float, default=2.2)
     parser.add_argument("--final-radius", type=float, default=0.35)
-    parser.add_argument("--direct-land-radius", type=float, default=0.18)
-    parser.add_argument("--direct-land-altitude-above-pad", type=float, default=0.15)
-    parser.add_argument("--direct-land-stable-time", type=float, default=0.80)
-    parser.add_argument("--direct-land-max-horizontal-speed", type=float, default=0.35)
-    parser.add_argument("--direct-land-max-relative-speed", type=float, default=0.25)
+    parser.add_argument("--direct-land-radius", type=float, default=0.25)
+    parser.add_argument("--direct-land-altitude-above-pad", type=float, default=0.55)
+    parser.add_argument("--direct-land-stable-time", type=float, default=0.15)
+    parser.add_argument("--direct-land-max-horizontal-speed", type=float, default=1.20)
+    parser.add_argument("--direct-land-max-relative-speed", type=float, default=1.35)
     parser.add_argument("--direct-land-min-marker-speed", type=float, default=0.0)
+    parser.add_argument("--publish-land-on-direct-ready", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--pad-capture-radius", type=float, default=3.00)
     parser.add_argument("--pad-capture-exit-radius", type=float, default=3.60)
     parser.add_argument("--final-descent-radius", type=float, default=0.90)
@@ -1452,8 +2254,8 @@ def main():
     parser.add_argument("--final-center-corridor-radius", type=float, default=0.40)
     parser.add_argument("--final-center-corridor-gain", type=float, default=0.18)
     parser.add_argument("--final-center-corridor-prediction-time", type=float, default=0.08)
-    parser.add_argument("--centering-error-for-descent", type=float, default=0.45)
-    parser.add_argument("--max-relative-speed-for-descent", type=float, default=0.45)
+    parser.add_argument("--centering-error-for-descent", type=float, default=0.28)
+    parser.add_argument("--max-relative-speed-for-descent", type=float, default=1.25)
     parser.add_argument("--centering-hold-height-above-pad", type=float, default=0.70)
     parser.add_argument("--unsafe-descent-scale", type=float, default=0.25)
     parser.add_argument("--descent-center-prediction-time", type=float, default=0.35)
@@ -1480,9 +2282,13 @@ def main():
     parser.add_argument("--accel-control-capture-max-accel", type=float, default=0.80)
     parser.add_argument("--accel-control-final-max-accel", type=float, default=0.55)
     parser.add_argument("--accel-control-wind-gain", type=float, default=0.08)
+    parser.add_argument("--opposing-accel-velocity-deadband", type=float, default=0.08)
     parser.add_argument("--vertical-velocity-control-kp", type=float, default=0.80)
     parser.add_argument("--vertical-velocity-control-max-down", type=float, default=0.55)
     parser.add_argument("--vertical-velocity-control-max-up", type=float, default=0.25)
+    parser.add_argument("--vertical-descent-lookahead", type=float, default=0.80)
+    parser.add_argument("--terminal-vertical-descent-lookahead", type=float, default=1.10)
+    parser.add_argument("--terminal-min-descent-rate", type=float, default=0.22)
     parser.add_argument("--ontology-min-velocity-speed", type=float, default=0.20)
     parser.add_argument("--ontology-capture-velocity-scale", type=float, default=0.80)
     parser.add_argument("--ontology-final-velocity-scale", type=float, default=0.60)

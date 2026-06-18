@@ -28,6 +28,22 @@ if should_read_ros_measurement(sim, cfg)
     end
 end
 
+if should_hold_last_ros_state(sim, cfg)
+    uavState = sim.lastKnownState;
+    uavState.timestamp = timestamp;
+    uavState.velocity = [0.0, 0.0, 0.0];
+    uavState.isMock = false;
+    uavState.source = 'held_last_ros_odometry';
+    sim.truth.position = uavState.position;
+    sim.truth.velocity = uavState.velocity;
+    sim.truth.attitude = uavState.attitude;
+    sim.truth.altitude = uavState.altitude;
+    sim.truth.timestamp = timestamp;
+    sim.state = sim.truth;
+    sim.lastKnownState = uavState;
+    return;
+end
+
 if strcmp(action, 'LAND')
     descentRate = cfg.simulator.nominalDescentRate;
 else
@@ -57,6 +73,9 @@ uavState.position = [positionXY, altitude];
 uavState.velocity = [velocityXY, verticalVelocity];
 uavState.attitude = [rollRad, pitchRad, yawRad];
 uavState.altitude = altitude;
+uavState.localAltitude = altitude;
+uavState.worldAltitude = altitude;
+uavState.altitudeOffset = 0.0;
 uavState.windVector = windVector;
 uavState.windSpeed = windSpeed;
 uavState.isMock = true;
@@ -162,6 +181,15 @@ end
 isStale = sim.rosStateMonitor.staleCount >= triggerCount;
 end
 
+function tf = should_hold_last_ros_state(sim, cfg)
+tf = isfield(sim, 'isConnected') && sim.isConnected && ...
+    isfield(cfg, 'simulator') && isfield(cfg.simulator, 'holdLastRosStateOnDropout') && ...
+    cfg.simulator.holdLastRosStateOnDropout && ...
+    isfield(sim, 'lastKnownState') && isstruct(sim.lastKnownState) && ...
+    isfield(sim.lastKnownState, 'position') && numel(sim.lastKnownState.position) >= 3 && ...
+    isfield(sim.lastKnownState, 'isMock') && ~sim.lastKnownState.isMock;
+end
+
 function [uavState, sim, ok] = try_read_ros_odometry(sim, timestamp, windVector, cfg)
 ok = false;
 uavState = struct();
@@ -173,17 +201,14 @@ end
 topic = SimulationConfig.resolve_topic('odometry', ns);
 
 [posOk, position] = read_ros_vector_field(topic, 'pose.pose.position');
-[velOk, velocity] = read_ros_vector_field(topic, 'twist.twist.linear');
 if ~posOk
     return;
 end
-if ~velOk
-    if isfield(sim, 'truth') && isfield(sim.truth, 'position') && isfield(sim.truth, 'timestamp')
-        dt = max(timestamp - sim.truth.timestamp, cfg.simulation.dt);
-        velocity = (position - sim.truth.position) ./ max(dt, eps);
-    else
-        velocity = [0.0, 0.0, 0.0];
-    end
+if isfield(sim, 'truth') && isfield(sim.truth, 'position') && isfield(sim.truth, 'timestamp')
+    dt = max(timestamp - sim.truth.timestamp, cfg.simulation.dt);
+    velocity = (position - sim.truth.position) ./ max(dt, eps);
+else
+    velocity = [0.0, 0.0, 0.0];
 end
 
 attitude = [0.0, 0.0, 0.0];
@@ -191,12 +216,18 @@ if isfield(sim, 'truth') && isfield(sim.truth, 'attitude')
     attitude = sim.truth.attitude;
 end
 
+sim = update_ros_altitude_offset(sim, position, cfg);
+localAltitude = max(0.0, position(3) - sim.rosAltitudeOffset);
+
 uavState = struct();
 uavState.timestamp = timestamp;
 uavState.position = position;
 uavState.velocity = velocity;
 uavState.attitude = attitude;
-uavState.altitude = position(3);
+uavState.altitude = localAltitude;
+uavState.localAltitude = localAltitude;
+uavState.worldAltitude = position(3);
+uavState.altitudeOffset = sim.rosAltitudeOffset;
 uavState.windVector = windVector;
 uavState.windSpeed = norm(windVector);
 uavState.isMock = false;
@@ -212,14 +243,31 @@ sim.lastKnownState = uavState;
 ok = true;
 end
 
+function sim = update_ros_altitude_offset(sim, position, cfg)
+if isfield(sim, 'rosAltitudeOffset') && isfinite(sim.rosAltitudeOffset)
+    return;
+end
+if isfield(sim, 'guidance') && isfield(sim.guidance, 'odomAltitudeOffset') && ...
+        ~isempty(sim.guidance.odomAltitudeOffset) && isfinite(sim.guidance.odomAltitudeOffset)
+    sim.rosAltitudeOffset = max(0.0, sim.guidance.odomAltitudeOffset);
+    return;
+end
+takeoffAltitude = get_simulator_value(cfg, 'takeoffAltitude', 5.0);
+if numel(position) >= 3 && isfinite(position(3)) && position(3) > takeoffAltitude + 0.5
+    sim.rosAltitudeOffset = max(0.0, position(3) - takeoffAltitude);
+else
+    sim.rosAltitudeOffset = 0.0;
+end
+end
+
 function [ok, vector] = read_ros_vector_field(topic, fieldName)
 ok = false;
 vector = [nan, nan, nan];
-qosProfiles = {'reliable', 'best_effort', 'system_default'};
+qosProfiles = {'best_effort', 'reliable'};
 output = '';
 for idx = 1:numel(qosProfiles)
-    cmd = sprintf(['timeout 2 %s bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
-        'export ROS_DOMAIN_ID=0; timeout 1.4 ros2 topic echo --no-daemon --spin-time 0.4 ' ...
+    cmd = sprintf(['timeout 0.6 %s bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
+        'export ROS_DOMAIN_ID=0; timeout 0.35 ros2 topic echo --no-daemon --spin-time 0.12 ' ...
         '--qos-reliability %s --once --field "%s" "%s" nav_msgs/msg/Odometry 2>/dev/null'''], ...
         clean_env_command_prefix(), qosProfiles{idx}, fieldName, topic);
     [status, candidate] = system(cmd);

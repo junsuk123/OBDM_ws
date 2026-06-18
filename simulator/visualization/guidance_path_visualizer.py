@@ -32,17 +32,19 @@ class GuidancePathVisualizer:
         self.latest_actual_pose = None
         self.latest_marker_pose = None
         self.latest_target_pose = None
+        self.latest_destination_pose = None
         self.generated_pub = self.node.create_publisher(Path, args.generated_path_topic, 10)
         self.actual_pub = self.node.create_publisher(Path, args.actual_path_topic, 10)
         self.target_pub = self.node.create_publisher(PoseStamped, args.current_target_topic, 10)
         self.topdown_pub = self.node.create_publisher(Image, args.topdown_image_topic, 2)
         self.node.create_subscription(PoseStamped, args.setpoint_topic, self.on_setpoint, 10)
+        self.node.create_subscription(PoseStamped, args.destination_topic, self.on_destination, 10)
         self.node.create_subscription(PoseStamped, args.origin_topic, self.on_origin, 10)
         self.node.create_subscription(Odometry, args.odom_topic, self.on_odom, qos)
         self.node.create_subscription(Odometry, args.marker_topic, self.on_marker, qos)
         self.image_timer = self.node.create_timer(1.0 / max(args.topdown_rate, 0.1), self.publish_topdown_image)
         self.node.get_logger().info(
-            f"guidance path visualizer: setpoints={args.setpoint_topic}, origin={args.origin_topic}, "
+            f"guidance path visualizer: setpoints={args.setpoint_topic}, destination={args.destination_topic}, origin={args.origin_topic}, "
             f"odom={args.odom_topic}, marker={args.marker_topic}, frame={args.fixed_frame}, "
             f"topdown_image={args.topdown_image_topic}"
         )
@@ -88,12 +90,12 @@ class GuidancePathVisualizer:
         self.origin = origin
         self.z_offset = z_offset
 
-    def on_setpoint(self, msg):
+    def local_ned_pose_to_world(self, msg):
         north = float(msg.pose.position.x)
         east = float(msg.pose.position.y)
         z_up = float(msg.pose.position.z)
         if not finite3((north, east, z_up)):
-            return
+            return None
         if self.origin is None:
             ox, oy = 0.0, 0.0
             z_offset = 0.0
@@ -109,30 +111,59 @@ class GuidancePathVisualizer:
         pose.pose.position.y = oy + north
         pose.pose.position.z = z_offset + z_up
         pose.pose.orientation.w = 1.0
+        return pose
+
+    def on_destination(self, msg):
+        pose = self.local_ned_pose_to_world(msg)
+        if pose is None:
+            return
+        self.latest_destination_pose = pose
+        self.rebuild_generated_path()
+
+    def on_setpoint(self, msg):
+        pose = self.local_ned_pose_to_world(msg)
+        if pose is None:
+            return
         self.latest_target_pose = pose
         self.target_pub.publish(pose)
-        if self.args.current_generated_only:
-            self.generated_path.poses = []
-            if self.latest_actual_pose is not None:
-                self.generated_path.poses.append(self.latest_actual_pose)
-            self.generated_path.poses.append(pose)
-            self.publish_path(self.generated_pub, self.generated_path)
-            self.last_generated = (
-                float(pose.pose.position.x),
-                float(pose.pose.position.y),
-                float(pose.pose.position.z),
-            )
-        elif self.should_append(self.last_generated, pose.pose.position):
-            if self.should_reset_generated_path(pose.pose.position):
-                self.generated_path.poses = []
-            self.generated_path.poses.append(pose)
-            self.generated_path.poses = self.generated_path.poses[-self.args.max_generated_points :]
-            self.last_generated = (
-                float(pose.pose.position.x),
-                float(pose.pose.position.y),
-                float(pose.pose.position.z),
-            )
-            self.publish_path(self.generated_pub, self.generated_path)
+        self.last_generated = (
+            float(pose.pose.position.x),
+            float(pose.pose.position.y),
+            float(pose.pose.position.z),
+        )
+        self.rebuild_generated_path()
+
+    def rebuild_generated_path(self):
+        poses = []
+        if self.latest_actual_pose is not None:
+            poses.append(self.latest_actual_pose)
+        if self.latest_target_pose is not None:
+            poses.append(self.latest_target_pose)
+        if self.latest_destination_pose is not None:
+            if not poses or self.should_append_pose(poses[-1].pose.position, self.latest_destination_pose.pose.position):
+                poses.append(self.latest_destination_pose)
+            else:
+                poses[-1] = self.latest_destination_pose
+        self.generated_path.poses = poses
+        self.publish_path(self.generated_pub, self.generated_path)
+
+    def publish_generated_path_with_destination(self):
+        path = Path()
+        path.header.frame_id = self.args.fixed_frame
+        path.header.stamp = self.node.get_clock().now().to_msg()
+        path.poses = list(self.generated_path.poses)
+        if self.latest_destination_pose is not None:
+            if not path.poses or self.should_append_pose(path.poses[-1].pose.position, self.latest_destination_pose.pose.position):
+                path.poses.append(self.latest_destination_pose)
+            else:
+                path.poses[-1] = self.latest_destination_pose
+        self.publish_path(self.generated_pub, path)
+
+    def should_append_pose(self, a, b):
+        dx = float(a.x) - float(b.x)
+        dy = float(a.y) - float(b.y)
+        dz = float(a.z) - float(b.z)
+        return math.sqrt(dx * dx + dy * dy + dz * dz) >= self.args.min_point_spacing
 
     def should_append(self, last, position):
         if last is None:
@@ -171,7 +202,7 @@ class GuidancePathVisualizer:
         draw_grid(data, width, height, min_x, max_x, min_y, max_y, world_to_px, self.args.topdown_grid_m)
 
         actual = [(p.pose.position.x, p.pose.position.y) for p in self.actual_path.poses]
-        generated = [(p.pose.position.x, p.pose.position.y) for p in self.generated_path.poses]
+        generated = [(p.pose.position.x, p.pose.position.y) for p in self.generated_poses_with_destination()]
         draw_polyline(data, width, height, actual, world_to_px, (35, 110, 220), 3)
         draw_polyline(data, width, height, generated, world_to_px, (235, 126, 35), 3)
 
@@ -193,8 +224,11 @@ class GuidancePathVisualizer:
 
     def collect_topdown_points(self):
         points = []
-        for path in (self.actual_path, self.generated_path):
-            for pose in path.poses:
+        for pose in self.actual_path.poses:
+            p = pose.pose.position
+            if math.isfinite(float(p.x)) and math.isfinite(float(p.y)):
+                points.append((float(p.x), float(p.y)))
+        for pose in self.generated_poses_with_destination():
                 p = pose.pose.position
                 if math.isfinite(float(p.x)) and math.isfinite(float(p.y)):
                     points.append((float(p.x), float(p.y)))
@@ -205,6 +239,15 @@ class GuidancePathVisualizer:
             if math.isfinite(float(p.x)) and math.isfinite(float(p.y)):
                 points.append((float(p.x), float(p.y)))
         return points
+
+    def generated_poses_with_destination(self):
+        poses = list(self.generated_path.poses)
+        if self.latest_destination_pose is not None:
+            if not poses or self.should_append_pose(poses[-1].pose.position, self.latest_destination_pose.pose.position):
+                poses.append(self.latest_destination_pose)
+            else:
+                poses[-1] = self.latest_destination_pose
+        return poses
 
     def make_image(self, data, width, height):
         msg = Image()
@@ -338,6 +381,7 @@ def draw_legend(data, width, height):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--setpoint-topic", default="/obdm/guidance_setpoint")
+    parser.add_argument("--destination-topic", default="/obdm/guidance_destination")
     parser.add_argument("--origin-topic", default="/obdm/guidance_origin")
     parser.add_argument("--odom-topic", default="/iris/odometry")
     parser.add_argument("--marker-topic", default="/landing_marker/ground_truth/odom")

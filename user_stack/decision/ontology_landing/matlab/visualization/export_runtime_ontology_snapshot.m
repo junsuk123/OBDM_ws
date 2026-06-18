@@ -1,4 +1,4 @@
-function export_runtime_ontology_snapshot(uavState, ~, observation, semantic, classProbability, confidence, action, cfg)
+function export_runtime_ontology_snapshot(uavState, ~, observation, semantic, landingIntentScore, confidence, action, cfg)
 %EXPORT_RUNTIME_ONTOLOGY_SNAPSHOT Stream one ontology snapshot from the main loop.
 
 if nargin < 8 || ~isstruct(cfg) || ~isfield(cfg, 'visualization') || ...
@@ -23,7 +23,7 @@ try
     closingSpeed = max(0.2, -dot(rel, relVel) / max(range, eps));
 
     ontologyGraph = evaluate_landing_ontology_graph(markerPosition, markerVelocity, uavState, ...
-        semantic, classProbability, confidence, range, closingSpeed, cfg);
+        semantic, landingIntentScore, confidence, range, closingSpeed, cfg);
     if isfield(uavState, 'timestamp') && ~isempty(uavState.timestamp)
         ontologyGraph.timestamp = uavState.timestamp;
     end
@@ -32,7 +32,7 @@ try
     trajectory.distanceToMarker = range;
     trajectory.target = [ontologyGraph.values.approachAimPoint, uavState.position(3)];
     trajectory.finalLand = false;
-    export_ontology_graph_snapshot(ontologyGraph, cfg, trajectory, action, classProbability, confidence);
+    export_ontology_graph_snapshot(ontologyGraph, cfg, trajectory, action, landingIntentScore, confidence);
 catch exportError
     warning('ontology_viewer:RuntimeExportFailed', ...
         '[ontology_viewer] Failed to export runtime graph snapshot: %s', exportError.message);

@@ -1,4 +1,4 @@
-% Main entry point for the ontology-based probabilistic landing framework.
+% Main entry point for the ontology-based landing decision framework.
 
 close all force;
 clearvars;
@@ -6,11 +6,10 @@ clear classes;
 clc;
 
 % ===================== USER PIPELINE SWITCHES =====================
-% A single run can collect data, train a model/semantic policy, and validate
+% A single run can collect data, tune semantic policy artifacts, and validate
 % the result. Turn stages on/off here without editing lower-level modules.
 MAIN_PIPELINE = struct();
 MAIN_PIPELINE.collectData = true;
-MAIN_PIPELINE.trainModel = true;
 MAIN_PIPELINE.trainOntologyWeights = true;
 MAIN_PIPELINE.validateModel = true;
 MAIN_PIPELINE.useHistoricalTrainingData = true;
@@ -21,9 +20,6 @@ MAIN_PIPELINE.savePlots = true;
 MAIN_PIPELINE.shutdownSimulatorOnFinish = true;
 % Used when collectData=false. Leave empty to auto-use the latest result MAT.
 MAIN_PIPELINE.inputResultsMat = '';
-% Used when trainModel=false and validateModel=true. Leave empty to use a
-% model stored in inputResultsMat or the model trained during this run.
-MAIN_PIPELINE.pretrainedModelMat = '';
 
 % ===================== USER TUNING PARAMETERS =====================
 % These values are copied into cfg before any collection/training/validation.
@@ -38,28 +34,48 @@ MAIN_TUNING.softResetRosCleanupGraceSeconds = 0.4;
 MAIN_TUNING.softResetPoseToleranceDrone = 0.75;
 MAIN_TUNING.softResetPoseToleranceRover = 0.35;
 MAIN_TUNING.duration = 45.0;
-MAIN_TUNING.dt = 0.2;
+MAIN_TUNING.dt = 0.1;
 MAIN_TUNING.stopOnTouchdown = true;
 MAIN_TUNING.showOntologyGraph = true;
 MAIN_TUNING.visualizationVisible = true;
 MAIN_TUNING.web3dOntologyViewer = true;
 MAIN_TUNING.web3dOpenChrome = true;
 MAIN_TUNING.web3dPort = 8765;
+MAIN_TUNING.rosReadEveryNSteps = 1;
+MAIN_TUNING.useRealtimeTrajectoryGenerator = true;
+MAIN_TUNING.matlabSetpointPublisherEnabled = false;
 MAIN_TUNING.takeoffAltitude = 5.0;
 MAIN_TUNING.padMotionAmplitude = 1.0;
 MAIN_TUNING.padMotionFrequency = 0.01;
-MAIN_TUNING.padMotionSpeed = 3.0;
-MAIN_TUNING.directLandRadius = 0.7;
-MAIN_TUNING.directLandAltitudeAbovePad = 0.45;
-MAIN_TUNING.directLandStableTime = 0.40;
-MAIN_TUNING.directLandMaxHorizontalSpeed = 2.00;
+MAIN_TUNING.padMotionSpeed = 1.2;
+MAIN_TUNING.directLandRadius = 0.25;
+MAIN_TUNING.directLandAltitudeAbovePad = 0.55;
+MAIN_TUNING.directLandStableTime = 0.15;
+MAIN_TUNING.directLandMaxHorizontalSpeed = 1.20;
+MAIN_TUNING.directLandMaxRelativeSpeed = 1.35;
+MAIN_TUNING.guidanceSmoothingAlpha = 1.00;
+MAIN_TUNING.ontologyDistancePriority = 0.85;
+MAIN_TUNING.ontologyMinLeadTime = 0.15;
+MAIN_TUNING.ontologyMaxLeadTime = 0.75;
+MAIN_TUNING.ontologyLeadDistanceGain = 0.05;
+MAIN_TUNING.ontologyPredictionSteps = 3;
+MAIN_TUNING.ontologyPredictionStepTime = 0.10;
+MAIN_TUNING.ontologyPredictionHorizon = 1.00;
+MAIN_TUNING.ontologyFuturePointBlend = 0.15;
+MAIN_TUNING.ontologyMaxAimOffset = 0.60;
+MAIN_TUNING.commandPadCenter = true;
+MAIN_TUNING.precisionFuturePointBlend = 0.05;
+MAIN_TUNING.precisionMaxAimOffset = 0.20;
 MAIN_TUNING.contactArmingAltitude = 1.50;
 MAIN_TUNING.contactMinFlightTime = 1.50;
 MAIN_TUNING.contactMinSamples = 5;
-MAIN_TUNING.windDifficulty = 1.4;
-MAIN_TUNING.windMeanVelocity = [3.0, 0.8, 0.0];
-MAIN_TUNING.windGustStd = [1.5, 1.4, 0.4];
-MAIN_TUNING.windMaxSpeed = 7.0;
+MAIN_TUNING.stopOnlyOnPadTouchdown = true;
+MAIN_TUNING.resetOnGroundContact = true;
+MAIN_TUNING.allowTouchdownThresholdFallback = true;
+MAIN_TUNING.windDifficulty = 0.65;
+MAIN_TUNING.windMeanVelocity = [2.2, 0.5, 0.0];
+MAIN_TUNING.windGustStd = [0.65, 0.55, 0.12];
+MAIN_TUNING.windMaxSpeed = 3.2;
 MAIN_TUNING.windPublishPeriod = 0.1;
 MAIN_TUNING.ontologyLandingIntentFloor = 0.45;
 MAIN_TUNING.ontologyFinalLandMinAlignment = 0.72;
@@ -94,8 +110,8 @@ cfg.results.outputDir = runDir;
 
 fprintf('[main] Project root: %s\n', projectRoot);
 fprintf('[main] Results directory: %s\n', runDir);
-fprintf('[main] Pipeline: collect=%d trainModel=%d trainOntology=%d validate=%d trace=%d\n', ...
-    cfg.pipeline.collectData, cfg.pipeline.trainModel, cfg.pipeline.trainOntologyWeights, ...
+fprintf('[main] Pipeline: collect=%d trainOntology=%d validate=%d trace=%d\n', ...
+    cfg.pipeline.collectData, cfg.pipeline.trainOntologyWeights, ...
     cfg.pipeline.validateModel, cfg.pipeline.runTraceCollector);
 fprintf('[main] Wind: difficulty=%.2f mean=[%.2f %.2f %.2f] gustStd=[%.2f %.2f %.2f] max=%.2f publishPeriod=%.2f\n', ...
     cfg.wind.difficulty, cfg.wind.meanVelocity(1), cfg.wind.meanVelocity(2), cfg.wind.meanVelocity(3), ...
@@ -107,10 +123,9 @@ if cfg.visualization.web3dEnabled
 end
 
 historicalData = empty_training_data();
-previousModel = struct();
 historicalSummary = struct('runCount', 0, 'sampleCount', 0, 'sourceFiles', {{}});
 if cfg.pipeline.useHistoricalTrainingData && cfg.pipeline.collectData
-    [historicalData, previousModel, historicalSummary] = load_historical_training_data(resultsRoot, runDir, cfg);
+    [historicalData, historicalSummary] = load_historical_training_data(resultsRoot, runDir, cfg);
     fprintf('[main] Historical training data: runs=%d samples=%d\n', ...
         historicalSummary.runCount, historicalSummary.sampleCount);
 end
@@ -133,7 +148,6 @@ else
     fprintf('[main] Data collection disabled; loading dataset from previous result.\n');
 end
 
-featureMatrix = [];
 semanticMatrix = [];
 rawMatrix = [];
 labelVector = [];
@@ -156,21 +170,9 @@ scenarioLogs = repmat(struct( ...
     'state', [], ...
     'observation', [], ...
     'semantic', [], ...
-    'feature', [], ...
     'onlineDecision', [], ...
     'finalLabel', []), cfg.simulation.numScenarios, 1);
 
-expectedFeatureCount = numel(cfg.featureFusion.rawNames) + numel(cfg.featureFusion.semanticNames);
-if is_model_compatible(previousModel, expectedFeatureCount)
-    model = previousModel;
-    fprintf('[main] Starting online decisions from previous trained model (%d samples).\n', model.sampleCount);
-elseif isfield(previousModel, 'isTrained') && previousModel.isTrained
-    fprintf('[main] Previous model has %d features, current ontology uses %d; using baseline until retraining.\n', ...
-        model_feature_count(previousModel), expectedFeatureCount);
-    model = struct();
-else
-    model = struct();
-end
 touchdownInfo = default_contact_info();
 
 if cfg.pipeline.collectData
@@ -202,7 +204,6 @@ for scenarioIdx = 1:cfg.simulation.numScenarios
     scenarioState = struct();
     scenarioObservation = struct();
     scenarioSemantic = struct();
-    scenarioFeature = struct();
     scenarioAction = cell(numel(cfg.simulation.timeVector), 1);
     takeoffConfirmed = false;
     scenarioContact = default_contact_info();
@@ -220,22 +221,14 @@ for scenarioIdx = 1:cfg.simulation.numScenarios
         [windState, sim] = read_wind_condition(sim, t, currentWind, cfg);
         [observation, sim] = read_landing_observation(sim, uavState, windState, cfg);
         semantic = compute_ontology_features(uavState, windState, observation, cfg);
-        fused = fuse_features(observation.continuous, semantic, cfg);
 
-        if is_model_compatible(model, numel(fused.vector))
-            [predictedLabel, classProbability, confidence, predictedAction] = predict_gaussian_nb(model, fused.vector);
-        else
-            [predictedLabel, baselineScore, predictedAction] = threshold_baseline_decision(semantic, cfg);
-            classProbability = [1.0 - baselineScore, baselineScore];
-            confidence = max(classProbability);
-        end
+        [predictedLabel, landingIntentScore, confidence, predictedAction] = ontology_landing_decision(semantic, cfg);
 
         export_runtime_ontology_snapshot(uavState, windState, observation, semantic, ...
-            classProbability, confidence, predictedAction, cfg);
+            landingIntentScore, confidence, predictedAction, cfg);
 
-        sim = send_decision_command(sim, predictedAction, classProbability, confidence, cfg, uavState, observation, semantic);
+        sim = send_decision_command(sim, predictedAction, landingIntentScore, confidence, cfg, uavState, observation, semantic);
 
-        featureMatrix = [featureMatrix; fused.vector(:)']; %#ok<AGROW>
         semanticMatrix = [semanticMatrix; semantic.vector(:)']; %#ok<AGROW>
         rawMatrix = [rawMatrix; observation.continuous(:)']; %#ok<AGROW>
         timeVector = [timeVector; t]; %#ok<AGROW>
@@ -247,17 +240,16 @@ for scenarioIdx = 1:cfg.simulation.numScenarios
         yawVector = [yawVector; uavState.attitude(3)]; %#ok<AGROW>
         positionErrorVector = [positionErrorVector; observation.positionError]; %#ok<AGROW>
         decisionOnlineVector = [decisionOnlineVector; predictedLabel]; %#ok<AGROW>
-        decisionOnlineScore = [decisionOnlineScore; classProbability(2)]; %#ok<AGROW>
+        decisionOnlineScore = [decisionOnlineScore; landingIntentScore]; %#ok<AGROW>
         decisionOnlineConfidence = [decisionOnlineConfidence; confidence]; %#ok<AGROW>
 
         scenarioSampleCount = scenarioSampleCount + 1;
-        scenarioState(scenarioSampleCount).uav = uavState; %#ok<AGROW>
-        scenarioObservation(scenarioSampleCount).value = observation; %#ok<AGROW>
-        scenarioSemantic(scenarioSampleCount).value = semantic; %#ok<AGROW>
-        scenarioFeature(scenarioSampleCount).value = fused; %#ok<AGROW>
+        scenarioState(scenarioSampleCount).uav = uavState;
+        scenarioObservation(scenarioSampleCount).value = observation;
+        scenarioSemantic(scenarioSampleCount).value = semantic;
         scenarioAction{scenarioSampleCount} = struct( ...
             'action', predictedAction, ...
-            'probability', classProbability, ...
+            'landingIntentScore', landingIntentScore, ...
             'confidence', confidence, ...
             'trajectory', sim.guidance.trajectory);
 
@@ -275,25 +267,32 @@ for scenarioIdx = 1:cfg.simulation.numScenarios
         else
             contact = default_contact_info();
         end
-        if contact.detected
+        resetOnGroundContact = get_labeling_value_local(cfg, 'resetOnGroundContact', true);
+        shouldStopForContact = contact.detected && ...
+            (~get_labeling_value_local(cfg, 'stopOnlyOnPadTouchdown', true) || ...
+            contact.success || (resetOnGroundContact && strcmpi(contact.type, 'ground')));
+        if shouldStopForContact
             contact.scenarioIndex = scenarioIdx;
             contact.time = t;
             scenarioContact = contact;
             touchdownInfo = contact;
-            sim = stopLandingPadMotion(sim);
             if contact.success
-                fprintf('[main] Landing-pad contact detected at t = %.1f s (xy=%.3f, z=%.3f). Immediate DISARM and clean restart.\n', ...
+                fprintf('[main] Landing-pad contact detected at t = %.1f s (xy=%.3f, z=%.3f). MATLAB-controlled stop, DISARM, and reset.\n', ...
                     t, contact.positionError, contact.altitude);
             else
-                fprintf('[main] Ground contact detected after takeoff at t = %.1f s (xy=%.3f, z=%.3f). Marking landing FAILED and clean restart.\n', ...
+                fprintf('[main] Ground contact detected after takeoff at t = %.1f s (xy=%.3f, z=%.3f). MATLAB-controlled stop and reset.\n', ...
                     t, contact.positionError, contact.altitude);
             end
-            disarmOk = run_mavlink_command('disarm', 0, 0, 0, 4, sim, cfg);
-            if contact.success && ~disarmOk
-                run_mavlink_command('land_disarm', 0, 0, 0, 6, sim, cfg);
-            end
-            sim = shutdownSimulator(sim);
+            sim = prepare_simulation_reset(sim, cfg, 'touchdown', contact);
+            sim = shutdownSimulator(sim, cfg, 'touchdown_reset');
             break;
+        elseif contact.detected
+            contact.scenarioIndex = scenarioIdx;
+            contact.time = t;
+            scenarioContact = contact;
+            touchdownInfo = contact;
+            fprintf('[main] Off-pad/ground contact candidate ignored for shutdown at t = %.1f s (source=%s, xy=%.3f, z=%.3f). Continuing until pad touchdown or timeout.\n', ...
+                t, contact.source, contact.positionError, contact.altitude);
         end
     end
 
@@ -311,24 +310,16 @@ for scenarioIdx = 1:cfg.simulation.numScenarios
     scenarioLogs(scenarioIdx).state = scenarioState;
     scenarioLogs(scenarioIdx).observation = scenarioObservation;
     scenarioLogs(scenarioIdx).semantic = scenarioSemantic;
-    scenarioLogs(scenarioIdx).feature = scenarioFeature;
     scenarioLogs(scenarioIdx).onlineDecision = scenarioAction;
     scenarioLogs(scenarioIdx).finalLabel = finalLabel;
 
-    [onlineTrainingFeatures, onlineTrainingLabels] = combined_training_dataset(historicalData, featureMatrix, labelVector);
-    if cfg.pipeline.trainModel && numel(unique(onlineTrainingLabels)) >= 2 && numel(onlineTrainingLabels) >= cfg.decision.minTrainingSamples
-        model = train_gaussian_nb(onlineTrainingFeatures, onlineTrainingLabels, cfg);
-    end
-
     if cfg.pipeline.shutdownSimulatorOnFinish && ...
             (~isfield(sim, 'runtimeShutdown') || ~sim.runtimeShutdown)
-        sim = stopLandingPadMotion(sim);
-        sim = shutdownSimulator(sim);
+        sim = shutdownSimulator(sim, cfg, 'scenario_complete');
     end
 end
 else
-    [loadedData, loadedModel] = load_pipeline_dataset(cfg, repoRoot);
-    featureMatrix = loadedData.featureMatrix;
+    loadedData = load_pipeline_dataset(cfg, repoRoot);
     semanticMatrix = loadedData.semanticMatrix;
     rawMatrix = loadedData.rawMatrix;
     labelVector = loadedData.labelVector;
@@ -345,10 +336,9 @@ else
     decisionOnlineConfidence = loadedData.decisionOnlineConfidence;
     scenarioLogs = loadedData.scenarioLogs;
     touchdownInfo = loadedData.touchdown;
-    model = loadedModel;
 end
 
-[trainingFeatureMatrix, trainingLabelVector] = combined_training_dataset(historicalData, featureMatrix, labelVector);
+trainingLabelVector = combined_label_dataset(historicalData, labelVector);
 trainingSemanticMatrix = semanticMatrix;
 if ~isempty(historicalData.semanticMatrix) && ~isempty(semanticMatrix) && ...
         size(historicalData.semanticMatrix, 2) == size(semanticMatrix, 2)
@@ -360,56 +350,33 @@ if size(trainingSemanticMatrix, 1) ~= numel(trainingLabelVector)
     trainingSemanticMatrix = semanticMatrix;
 end
 
-if cfg.pipeline.trainModel
-    if numel(unique(trainingLabelVector)) >= 2 && numel(trainingLabelVector) >= cfg.decision.minTrainingSamples
-        model = train_gaussian_nb(trainingFeatureMatrix, trainingLabelVector, cfg);
-    elseif ~isfield(model, 'isTrained') || ~model.isTrained
-        fprintf('[main] Model training skipped: need at least %d samples and both labels; got %d samples, %d class(es).\n', ...
-            cfg.decision.minTrainingSamples, numel(trainingLabelVector), numel(unique(trainingLabelVector)));
-        model = struct('isTrained', false);
-    end
-elseif ~cfg.pipeline.trainModel
-    model = load_pretrained_model_if_needed(model, cfg);
-end
-
 ontologyPolicy = struct();
 if cfg.pipeline.trainOntologyWeights
     ontologyPolicy = train_ontology_weight_artifact(trainingSemanticMatrix, trainingLabelVector, cfg, runDir);
 end
 
 if cfg.pipeline.validateModel
-    [proposedLabels, proposedProbabilities, proposedConfidence, proposedActions] = predict_gaussian_nb(model, featureMatrix);
-    [baselineLabels, baselineScore, baselineActions] = threshold_baseline_decision(semanticMatrix, cfg); %#ok<ASGLU>
-    results = evaluate_landing_decisions(labelVector, proposedLabels, baselineLabels, windSpeedVector, cfg);
-    previousResults = evaluate_previous_model(previousModel, labelVector, featureMatrix, baselineLabels, windSpeedVector, cfg);
+    [ontologyLabels, ontologyScores, ontologyConfidence, ontologyActions] = ontology_landing_decision_batch(semanticMatrix, cfg);
+    results = evaluate_landing_decisions(labelVector, ontologyLabels, windSpeedVector, cfg);
 else
     fprintf('[main] Validation disabled; saving collected/trained artifacts only.\n');
-    proposedLabels = [];
-    proposedProbabilities = [];
-    proposedConfidence = [];
-    proposedActions = {};
-    baselineLabels = [];
-    baselineActions = {};
+    ontologyLabels = [];
+    ontologyScores = [];
+    ontologyConfidence = [];
+    ontologyActions = {};
     results = empty_validation_results();
-    previousResults = struct();
 end
-results.model = model;
-results.previousModel = previousModel;
-results.previousModelEvaluation = previousResults;
 results.ontologyPolicy = ontologyPolicy;
 results.trainingSampleCount = numel(trainingLabelVector);
 results.currentRunSampleCount = numel(labelVector);
 results.historicalRunCount = historicalSummary.runCount;
 results.historicalSampleCount = historicalSummary.sampleCount;
 results.historicalSourceFiles = historicalSummary.sourceFiles;
-results.proposedProbabilities = proposedProbabilities;
-results.proposedConfidence = proposedConfidence;
-results.proposedActions = proposedActions;
-results.proposedLabels = proposedLabels;
+results.ontologyScores = ontologyScores;
+results.ontologyConfidence = ontologyConfidence;
+results.ontologyActions = ontologyActions;
+results.ontologyLabels = ontologyLabels;
 results.trueLabels = labelVector;
-results.baselineLabels = baselineLabels;
-results.baselineActions = baselineActions;
-results.featureMatrix = featureMatrix;
 results.semanticMatrix = semanticMatrix;
 results.rawMatrix = rawMatrix;
 results.timeVector = timeVector;
@@ -433,7 +400,7 @@ save(fullfile(runDir, 'landing_framework_results.mat'), 'cfg', 'results', 'scena
 
 summaryPath = fullfile(runDir, 'summary.txt');
 fid = fopen(summaryPath, 'w');
-fprintf(fid, 'Ontology-based probabilistic landing framework\n');
+fprintf(fid, 'Ontology-based landing decision framework\n');
 fprintf(fid, 'Run directory: %s\n', runDir);
 fprintf(fid, 'Completed scenarios evaluated: %d / %d\n', results.completedScenarioCount, cfg.simulation.numScenarios);
 fprintf(fid, 'Samples evaluated: %d\n', results.sampleCount);
@@ -451,15 +418,8 @@ if results.touchdown.detected
     fprintf(fid, 'Touchdown position error: %.4f m\n', results.touchdown.positionError);
     fprintf(fid, 'Touchdown vertical speed: %.4f m/s\n', results.touchdown.verticalSpeed);
 end
-fprintf(fid, 'Accuracy (proposed): %.4f\n', results.proposed.accuracy);
-fprintf(fid, 'Accuracy (baseline): %.4f\n', results.baseline.accuracy);
-if isfield(results.previousModelEvaluation, 'isAvailable') && results.previousModelEvaluation.isAvailable
-    fprintf(fid, 'Accuracy (previous model on current run): %.4f\n', results.previousModelEvaluation.metrics.proposed.accuracy);
-    fprintf(fid, 'Accuracy gain vs previous model: %.4f\n', ...
-        results.proposed.accuracy - results.previousModelEvaluation.metrics.proposed.accuracy);
-end
-fprintf(fid, 'Unsafe landing attempt rate (proposed): %.4f\n', results.proposed.unsafeLandingAttemptRate);
-fprintf(fid, 'Unsafe landing attempt rate (baseline): %.4f\n', results.baseline.unsafeLandingAttemptRate);
+fprintf(fid, 'Accuracy (ontology): %.4f\n', results.ontology.accuracy);
+fprintf(fid, 'Unsafe landing attempt rate (ontology): %.4f\n', results.ontology.unsafeLandingAttemptRate);
 if isfield(results, 'pathGeneration') && isfield(results.pathGeneration, 'summary')
     pathSummary = results.pathGeneration.summary;
     fprintf(fid, 'Path mean tracking error: %.4f m\n', pathSummary.meanTrackingError);
@@ -481,13 +441,11 @@ metricsTable = table( ...
     results.completedScenarioCount, results.sampleCount, double(results.touchdown.detected), ...
     results.trainingSampleCount, results.historicalRunCount, results.historicalSampleCount, ...
     double(results.touchdown.success), results.touchdown.scenarioIndex, results.touchdown.time, results.touchdown.altitude, results.touchdown.positionError, results.touchdown.verticalSpeed, ...
-    results.proposed.accuracy, results.proposed.precision, results.proposed.recall, results.proposed.f1Score, results.proposed.unsafeLandingAttemptRate, ...
-    results.baseline.accuracy, results.baseline.precision, results.baseline.recall, results.baseline.f1Score, results.baseline.unsafeLandingAttemptRate, ...
+    results.ontology.accuracy, results.ontology.precision, results.ontology.recall, results.ontology.f1Score, results.ontology.unsafeLandingAttemptRate, ...
     'VariableNames', {'completed_scenarios', 'sample_count', 'touchdown_detected', ...
     'training_sample_count', 'historical_run_count', 'historical_sample_count', ...
     'touchdown_success', 'touchdown_scenario', 'touchdown_time_s', 'touchdown_altitude_m', 'touchdown_position_error_m', 'touchdown_vertical_speed_mps', ...
-    'proposed_accuracy', 'proposed_precision', 'proposed_recall', 'proposed_f1', 'proposed_unsafe_attempt_rate', ...
-    'baseline_accuracy', 'baseline_precision', 'baseline_recall', 'baseline_f1', 'baseline_unsafe_attempt_rate'});
+    'ontology_accuracy', 'ontology_precision', 'ontology_recall', 'ontology_f1', 'ontology_unsafe_attempt_rate'});
 writetable(metricsTable, fullfile(runDir, 'metrics.csv'));
 write_path_metrics(results.pathGeneration, runDir);
 write_reinforcement_rewards(results.reinforcementTraining, runDir);
@@ -496,7 +454,7 @@ if cfg.pipeline.validateModel && cfg.pipeline.savePlots
     plot_landing_results(results, cfg, runDir);
 end
 if cfg.pipeline.collectData && cfg.pipeline.shutdownSimulatorOnFinish && ~isempty(fieldnames(sim))
-    sim = shutdownSimulator(sim);
+    sim = shutdownSimulator(sim, cfg, 'pipeline_complete');
 end
 
 fprintf('\n[main] Completed successfully.\n');
@@ -526,7 +484,6 @@ end
 function cfg = apply_main_pipeline_config(cfg, pipeline, tuning)
 cfg.pipeline = pipeline;
 cfg.pipeline.inputResultsMat = char(string(cfg.pipeline.inputResultsMat));
-cfg.pipeline.pretrainedModelMat = char(string(cfg.pipeline.pretrainedModelMat));
 if ~isfield(cfg.pipeline, 'useHistoricalTrainingData')
     cfg.pipeline.useHistoricalTrainingData = false;
 end
@@ -577,6 +534,9 @@ if isfield(tuning, 'web3dPort') && ~isempty(tuning.web3dPort)
 end
 
 cfg.simulator.takeoffAltitude = tuning.takeoffAltitude;
+if isfield(tuning, 'rosReadEveryNSteps') && ~isempty(tuning.rosReadEveryNSteps)
+    cfg.simulator.rosReadEveryNSteps = max(1, round(double(tuning.rosReadEveryNSteps)));
+end
 cfg.simulator.landingPadMotion.amplitude = tuning.padMotionAmplitude;
 cfg.simulator.landingPadMotion.frequency = tuning.padMotionFrequency;
 cfg.simulator.landingPadMotion.speed = tuning.padMotionSpeed;
@@ -585,6 +545,10 @@ cfg.guidance.directLandRadius = tuning.directLandRadius;
 cfg.guidance.directLandAltitudeAbovePad = tuning.directLandAltitudeAbovePad;
 cfg.guidance.directLandStableTime = tuning.directLandStableTime;
 cfg.guidance.directLandMaxHorizontalSpeed = tuning.directLandMaxHorizontalSpeed;
+if isfield(tuning, 'directLandMaxRelativeSpeed') && ~isempty(tuning.directLandMaxRelativeSpeed)
+    cfg.guidance.directLandMaxRelativeSpeed = tuning.directLandMaxRelativeSpeed;
+end
+cfg = apply_main_guidance_config(cfg, tuning);
 if isfield(tuning, 'contactArmingAltitude') && ~isempty(tuning.contactArmingAltitude)
     cfg.labeling.contactArmingAltitude = tuning.contactArmingAltitude;
 end
@@ -594,11 +558,65 @@ end
 if isfield(tuning, 'contactMinSamples') && ~isempty(tuning.contactMinSamples)
     cfg.labeling.contactMinSamples = max(1, round(double(tuning.contactMinSamples)));
 end
+if isfield(tuning, 'stopOnlyOnPadTouchdown') && ~isempty(tuning.stopOnlyOnPadTouchdown)
+    cfg.labeling.stopOnlyOnPadTouchdown = logical(tuning.stopOnlyOnPadTouchdown);
+end
+if isfield(tuning, 'resetOnGroundContact') && ~isempty(tuning.resetOnGroundContact)
+    cfg.labeling.resetOnGroundContact = logical(tuning.resetOnGroundContact);
+end
+if isfield(tuning, 'allowTouchdownThresholdFallback') && ~isempty(tuning.allowTouchdownThresholdFallback)
+    cfg.labeling.allowTouchdownThresholdFallback = logical(tuning.allowTouchdownThresholdFallback);
+end
 cfg = apply_main_wind_config(cfg, tuning);
 cfg.guidance.ontologyLandingIntentFloor = tuning.ontologyLandingIntentFloor;
 cfg.guidance.ontologyFinalLandMinAlignment = tuning.ontologyFinalLandMinAlignment;
 cfg.guidance.ontologyFinalLandMinVisualStability = tuning.ontologyFinalLandMinVisualStability;
 cfg.guidance.ontologyFinalLandMaxWindRisk = tuning.ontologyFinalLandMaxWindRisk;
+end
+
+function cfg = apply_main_guidance_config(cfg, tuning)
+fields = { ...
+    'guidanceSmoothingAlpha', 'smoothingAlpha'; ...
+    'ontologyDistancePriority', 'ontologyDistancePriority'; ...
+    'ontologyMinLeadTime', 'ontologyMinLeadTime'; ...
+    'ontologyMaxLeadTime', 'ontologyMaxLeadTime'; ...
+    'ontologyLeadDistanceGain', 'ontologyLeadDistanceGain'; ...
+    'ontologyPredictionSteps', 'ontologyPredictionSteps'; ...
+    'ontologyPredictionStepTime', 'ontologyPredictionStepTime'; ...
+    'ontologyPredictionHorizon', 'ontologyPredictionHorizon'; ...
+    'ontologyFuturePointBlend', 'ontologyFuturePointBlend'; ...
+    'ontologyMaxAimOffset', 'ontologyMaxAimOffset'; ...
+    'commandPadCenter', 'commandPadCenter'; ...
+    'useRealtimeTrajectoryGenerator', 'useRealtimeTrajectoryGenerator'; ...
+    'matlabSetpointPublisherEnabled', 'matlabSetpointPublisherEnabled'; ...
+    'precisionFuturePointBlend', 'precisionFuturePointBlend'; ...
+    'precisionMaxAimOffset', 'precisionMaxAimOffset'};
+for idx = 1:size(fields, 1)
+    tuningField = fields{idx, 1};
+    cfgField = fields{idx, 2};
+    if isfield(tuning, tuningField) && ~isempty(tuning.(tuningField))
+        if islogical(tuning.(tuningField))
+            cfg.guidance.(cfgField) = logical(tuning.(tuningField));
+        else
+            cfg.guidance.(cfgField) = double(tuning.(tuningField));
+        end
+    end
+end
+cfg.guidance.smoothingAlpha = clamp_local(cfg.guidance.smoothingAlpha, 0.0, 1.0);
+cfg.guidance.ontologyDistancePriority = clamp_local(cfg.guidance.ontologyDistancePriority, 0.0, 1.0);
+cfg.guidance.ontologyFuturePointBlend = clamp_local(cfg.guidance.ontologyFuturePointBlend, 0.0, 1.0);
+cfg.guidance.precisionFuturePointBlend = clamp_local(cfg.guidance.precisionFuturePointBlend, 0.0, 1.0);
+cfg.guidance.commandPadCenter = logical(cfg.guidance.commandPadCenter);
+cfg.guidance.useRealtimeTrajectoryGenerator = logical(cfg.guidance.useRealtimeTrajectoryGenerator);
+cfg.guidance.matlabSetpointPublisherEnabled = logical(cfg.guidance.matlabSetpointPublisherEnabled);
+cfg.guidance.ontologyMinLeadTime = max(0.0, cfg.guidance.ontologyMinLeadTime);
+cfg.guidance.ontologyMaxLeadTime = max(cfg.guidance.ontologyMinLeadTime, cfg.guidance.ontologyMaxLeadTime);
+cfg.guidance.ontologyLeadDistanceGain = max(0.0, cfg.guidance.ontologyLeadDistanceGain);
+cfg.guidance.ontologyPredictionSteps = max(0, round(cfg.guidance.ontologyPredictionSteps));
+cfg.guidance.ontologyPredictionStepTime = max(0.0, cfg.guidance.ontologyPredictionStepTime);
+cfg.guidance.ontologyPredictionHorizon = max(cfg.guidance.ontologyMaxLeadTime, cfg.guidance.ontologyPredictionHorizon);
+cfg.guidance.ontologyMaxAimOffset = max(0.0, cfg.guidance.ontologyMaxAimOffset);
+cfg.guidance.precisionMaxAimOffset = max(0.0, cfg.guidance.precisionMaxAimOffset);
 end
 
 function cfg = apply_main_wind_config(cfg, tuning)
@@ -632,6 +650,10 @@ if isfield(tuning, 'windPublishPeriod') && ~isempty(tuning.windPublishPeriod)
 end
 end
 
+function value = clamp_local(value, lowerBound, upperBound)
+value = max(lowerBound, min(upperBound, value));
+end
+
 function contact = default_contact_info()
 contact = struct( ...
     'detected', false, ...
@@ -659,7 +681,7 @@ catch ME
 end
 end
 
-function [data, model] = load_pipeline_dataset(cfg, repoRoot)
+function data = load_pipeline_dataset(cfg, repoRoot)
 inputPath = cfg.pipeline.inputResultsMat;
 if isempty(inputPath)
     inputPath = latest_result_mat(fullfile(repoRoot, 'results', 'matlab_logs', 'ontology_landing'));
@@ -674,7 +696,6 @@ if ~isfield(loaded, 'results')
 end
 results = loaded.results;
 data = struct();
-data.featureMatrix = field_or_default(results, 'featureMatrix', []);
 data.semanticMatrix = field_or_default(results, 'semanticMatrix', []);
 data.rawMatrix = field_or_default(results, 'rawMatrix', []);
 data.labelVector = field_or_default(results, 'trueLabels', []);
@@ -695,21 +716,17 @@ if isfield(loaded, 'scenarioLogs')
 else
     data.scenarioLogs = struct();
 end
-model = field_or_default(results, 'model', struct());
 end
 
 function data = empty_training_data()
 data = struct();
-data.featureMatrix = [];
 data.semanticMatrix = [];
 data.labelVector = [];
 end
 
-function [data, previousModel, summary] = load_historical_training_data(resultsRoot, currentRunDir, cfg)
+function [data, summary] = load_historical_training_data(resultsRoot, currentRunDir, cfg)
 data = empty_training_data();
-previousModel = struct();
 summary = struct('runCount', 0, 'sampleCount', 0, 'sourceFiles', {{}});
-expectedFeatureCount = numel(cfg.featureFusion.rawNames) + numel(cfg.featureFusion.semanticNames);
 expectedSemanticCount = numel(cfg.featureFusion.semanticNames);
 
 if cfg.pipeline.maxHistoricalRuns <= 0 || ~exist(resultsRoot, 'dir')
@@ -740,38 +757,22 @@ for idx = 1:numel(files)
     end
 
     result = loaded.results;
-    features = field_or_default(result, 'featureMatrix', []);
     labels = field_or_default(result, 'trueLabels', []);
     semantics = field_or_default(result, 'semanticMatrix', []);
-    if isempty(features) || isempty(labels) || size(features, 1) ~= numel(labels)
+    if isempty(labels) || isempty(semantics) || size(semantics, 1) ~= numel(labels)
         continue;
     end
-    if size(features, 2) ~= expectedFeatureCount
-        fprintf('[main] Skipping historical run with %d features; current ontology expects %d: %s\n', ...
-            size(features, 2), expectedFeatureCount, resultPath);
+    if size(semantics, 2) ~= expectedSemanticCount
+        fprintf('[main] Skipping historical run with %d semantic features; current ontology expects %d: %s\n', ...
+            size(semantics, 2), expectedSemanticCount, resultPath);
         continue;
-    end
-    if ~isempty(semantics) && size(semantics, 1) ~= numel(labels)
-        semantics = [];
-    elseif ~isempty(semantics) && size(semantics, 2) ~= expectedSemanticCount
-        semantics = [];
     end
 
-    data.featureMatrix = [data.featureMatrix; features]; %#ok<AGROW>
-    data.labelVector = [data.labelVector; labels(:)]; %#ok<AGROW>
-    if isempty(semantics)
-        data.semanticMatrix = [];
-    elseif ~isempty(data.semanticMatrix) || summary.runCount == 0
-        data.semanticMatrix = [data.semanticMatrix; semantics]; %#ok<AGROW>
-    end
+    data.labelVector = [data.labelVector; labels(:)];
+    data.semanticMatrix = [data.semanticMatrix; semantics];
     summary.runCount = summary.runCount + 1;
     summary.sampleCount = numel(data.labelVector);
-    summary.sourceFiles{end+1} = resultPath; %#ok<AGROW>
-
-    if (~isfield(previousModel, 'isTrained') || ~previousModel.isTrained) && ...
-            isfield(result, 'model') && is_model_compatible(result.model, expectedFeatureCount)
-        previousModel = result.model;
-    end
+    summary.sourceFiles{end+1} = resultPath;
 
     if summary.runCount >= cfg.pipeline.maxHistoricalRuns
         break;
@@ -779,40 +780,12 @@ for idx = 1:numel(files)
 end
 end
 
-function [trainingFeatureMatrix, trainingLabelVector] = combined_training_dataset(historicalData, currentFeatureMatrix, currentLabelVector)
-trainingFeatureMatrix = currentFeatureMatrix;
+function trainingLabelVector = combined_label_dataset(historicalData, currentLabelVector)
 trainingLabelVector = currentLabelVector(:);
-if ~isstruct(historicalData) || ~isfield(historicalData, 'featureMatrix') || ...
-        isempty(historicalData.featureMatrix) || ~isfield(historicalData, 'labelVector') || ...
-        size(historicalData.featureMatrix, 1) ~= numel(historicalData.labelVector)
+if ~isstruct(historicalData) || ~isfield(historicalData, 'labelVector') || isempty(historicalData.labelVector)
     return;
 end
-if isempty(currentFeatureMatrix)
-    trainingFeatureMatrix = historicalData.featureMatrix;
-    trainingLabelVector = historicalData.labelVector(:);
-elseif size(historicalData.featureMatrix, 2) == size(currentFeatureMatrix, 2)
-    trainingFeatureMatrix = [historicalData.featureMatrix; currentFeatureMatrix];
-    trainingLabelVector = [historicalData.labelVector(:); currentLabelVector(:)];
-end
-end
-
-function previousResults = evaluate_previous_model(previousModel, trueLabels, featureMatrix, baselineLabels, windSpeedVector, cfg)
-previousResults = struct('isAvailable', false);
-if ~isfield(previousModel, 'isTrained') || ~previousModel.isTrained || isempty(featureMatrix) || isempty(trueLabels)
-    return;
-end
-if ~is_model_compatible(previousModel, size(featureMatrix, 2))
-    previousResults.reason = sprintf('feature_count_mismatch_previous_%d_current_%d', ...
-        model_feature_count(previousModel), size(featureMatrix, 2));
-    return;
-end
-[previousLabels, previousProbabilities, previousConfidence, previousActions] = predict_gaussian_nb(previousModel, featureMatrix);
-previousResults.isAvailable = true;
-previousResults.labels = previousLabels;
-previousResults.probabilities = previousProbabilities;
-previousResults.confidence = previousConfidence;
-previousResults.actions = previousActions;
-previousResults.metrics = evaluate_landing_decisions(trueLabels, previousLabels, baselineLabels, windSpeedVector, cfg);
+trainingLabelVector = [historicalData.labelVector(:); currentLabelVector(:)];
 end
 
 function write_path_metrics(pathGeneration, runDir)
@@ -886,20 +859,6 @@ rewardTable = table(scenarioIndex, time, action, reward, tracking, smoothness, t
 writetable(rewardTable, fullfile(runDir, 'reinforcement_training_rewards.csv'));
 end
 
-function tf = is_model_compatible(model, featureCount)
-tf = isfield(model, 'isTrained') && model.isTrained && ...
-    model_feature_count(model) == featureCount;
-end
-
-function count = model_feature_count(model)
-count = NaN;
-if isfield(model, 'featureCount') && ~isempty(model.featureCount)
-    count = model.featureCount;
-elseif isfield(model, 'mean') && ~isempty(model.mean)
-    count = size(model.mean, 2);
-end
-end
-
 function path = latest_result_mat(resultsRoot)
 path = '';
 if ~exist(resultsRoot, 'dir')
@@ -911,26 +870,6 @@ if isempty(files)
 end
 [~, idx] = max([files.datenum]);
 path = fullfile(files(idx).folder, files(idx).name);
-end
-
-function model = load_pretrained_model_if_needed(model, cfg)
-if isfield(model, 'isTrained') && model.isTrained
-    return;
-end
-if isempty(cfg.pipeline.pretrainedModelMat)
-    if cfg.pipeline.validateModel
-        error('[main] trainModel=false and no trained/pretrained model is available for validation.');
-    end
-    return;
-end
-loaded = load(cfg.pipeline.pretrainedModelMat);
-if isfield(loaded, 'model')
-    model = loaded.model;
-elseif isfield(loaded, 'results') && isfield(loaded.results, 'model')
-    model = loaded.results.model;
-else
-    error('[main] Pretrained model MAT does not contain model or results.model: %s', cfg.pipeline.pretrainedModelMat);
-end
 end
 
 function value = field_or_default(item, fieldName, defaultValue)
@@ -962,9 +901,85 @@ function results = empty_validation_results()
 emptyMetrics = struct('accuracy', NaN, 'precision', NaN, 'recall', NaN, 'f1Score', NaN, ...
     'unsafeLandingAttemptRate', NaN);
 results = struct();
-results.proposed = emptyMetrics;
-results.baseline = emptyMetrics;
+results.ontology = emptyMetrics;
 results.windBins = [];
+end
+
+function [label, score, confidence, action] = ontology_landing_decision(semantic, cfg)
+semantic = complete_semantic_for_decision(semantic);
+score = ontology_decision_score(semantic);
+threshold = get_decision_threshold(cfg);
+label = double(score >= threshold);
+confidence = clamp_local(abs(score - threshold) / max(threshold, 1.0 - threshold) * 0.5 + 0.5, 0.0, 1.0);
+if label == 1
+    action = 'LAND';
+else
+    action = 'HOVER';
+end
+end
+
+function [labels, scores, confidence, actions] = ontology_landing_decision_batch(semanticMatrix, cfg)
+sampleCount = size(semanticMatrix, 1);
+labels = zeros(sampleCount, 1);
+scores = zeros(sampleCount, 1);
+confidence = zeros(sampleCount, 1);
+actions = cell(sampleCount, 1);
+names = cfg.featureFusion.semanticNames;
+for row = 1:sampleCount
+    semantic = struct();
+    for col = 1:min(numel(names), size(semanticMatrix, 2))
+        semantic.(names{col}) = semanticMatrix(row, col);
+    end
+    [labels(row), scores(row), confidence(row), actions{row}] = ontology_landing_decision(semantic, cfg);
+end
+end
+
+function score = ontology_decision_score(semantic)
+riskPenalty = clamp_local(0.55 * semantic.windRisk + 0.45 * semantic.dragRisk, 0.0, 1.0);
+score = clamp_local( ...
+    0.18 * semantic.alignmentState + ...
+    0.16 * semantic.relativeDistanceState + ...
+    0.13 * semantic.altitudeState + ...
+    0.13 * semantic.visualStability + ...
+    0.11 * semantic.descentStability + ...
+    0.10 * semantic.droneMotionStability + ...
+    0.08 * semantic.roverMotionStability + ...
+    0.06 * semantic.energyEfficiency + ...
+    0.05 * (1.0 - riskPenalty), 0.0, 1.0);
+end
+
+function threshold = get_decision_threshold(cfg)
+threshold = 0.62;
+if isfield(cfg, 'decision') && isfield(cfg.decision, 'ontologyIntentThreshold') && ...
+        ~isempty(cfg.decision.ontologyIntentThreshold)
+    threshold = cfg.decision.ontologyIntentThreshold;
+end
+threshold = clamp_local(threshold, 0.0, 1.0);
+end
+
+function semantic = complete_semantic_for_decision(semantic)
+defaults = struct( ...
+    'windRisk', 0.5, ...
+    'visualStability', 0.5, ...
+    'alignmentState', 0.5, ...
+    'attitudeStability', 0.5, ...
+    'descentStability', 0.5, ...
+    'dragRisk', 0.5, ...
+    'timeEfficiency', 0.5, ...
+    'energyEfficiency', 0.5, ...
+    'relativeDistanceState', 0.5, ...
+    'altitudeState', 0.5, ...
+    'droneMotionStability', 0.5, ...
+    'roverMotionStability', 0.5);
+fields = fieldnames(defaults);
+for idx = 1:numel(fields)
+    fieldName = fields{idx};
+    if ~isfield(semantic, fieldName) || isempty(semantic.(fieldName)) || ~isfinite(semantic.(fieldName))
+        semantic.(fieldName) = defaults.(fieldName);
+    else
+        semantic.(fieldName) = clamp_local(double(semantic.(fieldName)), 0.0, 1.0);
+    end
+end
 end
 
 function policy = train_ontology_weight_artifact(semanticMatrix, labelVector, cfg, runDir)
@@ -1067,7 +1082,7 @@ fid = fopen(fullfile(runDir, 'ontology_policy.json'), 'w');
 if fid < 0
     return;
 end
-cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
+cleanup = onCleanup(@() fclose(fid));
 fprintf(fid, '%s\n', jsonencode(policy, 'PrettyPrint', true));
 end
 
@@ -1079,27 +1094,27 @@ end
 trajectory = sim.guidance.trajectory;
 parts = {};
 if isfield(trajectory, 'distanceToMarker')
-    parts{end+1} = sprintf('pad_dist=%.2f', trajectory.distanceToMarker); %#ok<AGROW>
+    parts{end+1} = sprintf('pad_dist=%.2f', trajectory.distanceToMarker);
 end
 if isfield(trajectory, 'padEkfSource')
-    parts{end+1} = sprintf('ekf=%s', trajectory.padEkfSource); %#ok<AGROW>
+    parts{end+1} = sprintf('ekf=%s', trajectory.padEkfSource);
 end
 if isfield(trajectory, 'hasMarker')
-    parts{end+1} = sprintf('hasMarker=%d', trajectory.hasMarker); %#ok<AGROW>
+    parts{end+1} = sprintf('hasMarker=%d', trajectory.hasMarker);
 end
 if isfield(trajectory, 'approachStep')
-    parts{end+1} = sprintf('step=%.2f', trajectory.approachStep); %#ok<AGROW>
+    parts{end+1} = sprintf('step=%.2f', trajectory.approachStep);
 end
 if isfield(trajectory, 'maxHorizontalStep')
-    parts{end+1} = sprintf('maxStep=%.2f', trajectory.maxHorizontalStep); %#ok<AGROW>
+    parts{end+1} = sprintf('maxStep=%.2f', trajectory.maxHorizontalStep);
 end
 if isfield(trajectory, 'target') && numel(trajectory.target) >= 3
     target = trajectory.target;
-    parts{end+1} = sprintf('target=[%.2f %.2f %.2f]', target(1), target(2), target(3)); %#ok<AGROW>
+    parts{end+1} = sprintf('target=[%.2f %.2f %.2f]', target(1), target(2), target(3));
 end
 if isfield(sim.guidance, 'localTarget') && numel(sim.guidance.localTarget) >= 3
     localTarget = sim.guidance.localTarget;
-    parts{end+1} = sprintf('local=[%.2f %.2f %.2f]', localTarget(1), localTarget(2), localTarget(3)); %#ok<AGROW>
+    parts{end+1} = sprintf('local=[%.2f %.2f %.2f]', localTarget(1), localTarget(2), localTarget(3));
 end
 if isempty(parts)
     return;

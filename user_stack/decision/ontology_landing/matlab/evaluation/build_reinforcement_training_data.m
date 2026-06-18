@@ -158,12 +158,20 @@ end
 
 function features = extract_features(logItem, sampleCount, featureCount)
 features = nan(sampleCount, featureCount);
-if ~isfield(logItem, 'feature')
+if ~isfield(logItem, 'observation') || ~isfield(logItem, 'semantic')
     return;
 end
-for idx = 1:min(sampleCount, numel(logItem.feature))
-    if isfield(logItem.feature(idx), 'value') && isfield(logItem.feature(idx).value, 'vector')
-        vector = logItem.feature(idx).value.vector(:)';
+for idx = 1:min([sampleCount, numel(logItem.observation), numel(logItem.semantic)])
+    rawVector = [];
+    semanticVector = [];
+    if isfield(logItem.observation(idx), 'value') && isfield(logItem.observation(idx).value, 'continuous')
+        rawVector = logItem.observation(idx).value.continuous(:)';
+    end
+    if isfield(logItem.semantic(idx), 'value') && isfield(logItem.semantic(idx).value, 'vector')
+        semanticVector = logItem.semantic(idx).value.vector(:)';
+    end
+    vector = [rawVector, semanticVector];
+    if ~isempty(vector)
         features(idx, 1:min(featureCount, numel(vector))) = vector(1:min(featureCount, numel(vector)));
     end
 end

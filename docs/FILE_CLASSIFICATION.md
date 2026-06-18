@@ -32,8 +32,6 @@ This classification is based on the current `user_stack/decision/ontology_landin
 - `user_stack/control/gimbal/gimbal_controller_node.py`
 - `user_stack/control/gimbal/gimbal_init.py`
 - `user_stack/decision/ontology_landing/matlab/ontology_features/*.m`
-- `user_stack/decision/ontology_landing/matlab/feature_fusion/*.m`
-- `user_stack/decision/ontology_landing/matlab/decision_model/*.m`
 - `user_stack/decision/ontology_landing/matlab/labeling/*.m`
 
 ## D. Scenario Definitions

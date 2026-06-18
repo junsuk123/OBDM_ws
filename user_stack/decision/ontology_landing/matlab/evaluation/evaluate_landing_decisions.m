@@ -1,20 +1,17 @@
-function results = evaluate_landing_decisions(trueLabels, proposedLabels, baselineLabels, windSpeedVector, cfg)
-%EVALUATE_LANDING_DECISIONS Compare the proposed classifier against a baseline.
+function results = evaluate_landing_decisions(trueLabels, ontologyLabels, windSpeedVector, cfg)
+%EVALUATE_LANDING_DECISIONS Evaluate ontology-derived landing decisions.
 
 trueLabels = trueLabels(:);
-proposedLabels = proposedLabels(:);
-baselineLabels = baselineLabels(:);
+ontologyLabels = ontologyLabels(:);
 windSpeedVector = windSpeedVector(:);
 
 results = struct();
-results.proposed = compute_metrics(trueLabels, proposedLabels, cfg);
-results.baseline = compute_metrics(trueLabels, baselineLabels, cfg);
-results.windBinAnalysis = compute_wind_bin_analysis(trueLabels, proposedLabels, baselineLabels, windSpeedVector, cfg);
+results.ontology = compute_metrics(trueLabels, ontologyLabels, cfg);
+results.windBinAnalysis = compute_wind_bin_analysis(trueLabels, ontologyLabels, windSpeedVector, cfg);
 results.classOrder = cfg.decision.classLabels;
 results.windBins = cfg.evaluation.windBins;
 results.trueLabels = trueLabels;
-results.proposedLabels = proposedLabels;
-results.baselineLabels = baselineLabels;
+results.ontologyLabels = ontologyLabels;
 
 function metrics = compute_metrics(actualLabels, predictedLabels, cfg)
     positiveLabel = cfg.evaluation.positiveClassLabel;
@@ -37,7 +34,7 @@ function metrics = compute_metrics(actualLabels, predictedLabels, cfg)
     metrics.unsafeLandingAttemptRate = unsafeLandingAttemptRate;
 end
 
-function analysis = compute_wind_bin_analysis(actualLabels, proposedLabels, baselineLabels, windVector, cfg)
+function analysis = compute_wind_bin_analysis(actualLabels, ontologyLabels, windVector, cfg)
     edges = cfg.evaluation.windBins;
     binCount = numel(edges) - 1;
     analysis = repmat(struct(), binCount, 1);
@@ -51,23 +48,20 @@ function analysis = compute_wind_bin_analysis(actualLabels, proposedLabels, base
             mask = windVector >= lowerEdge & windVector < upperEdge;
         end
 
-        [proposedMetrics, baselineMetrics] = compute_bin_metrics(actualLabels(mask), proposedLabels(mask), baselineLabels(mask), cfg);
+        ontologyMetrics = compute_bin_metrics(actualLabels(mask), ontologyLabels(mask), cfg);
         analysis(binIdx).lowerEdge = lowerEdge;
         analysis(binIdx).upperEdge = upperEdge;
         analysis(binIdx).count = sum(mask);
-        analysis(binIdx).proposed = proposedMetrics;
-        analysis(binIdx).baseline = baselineMetrics;
+        analysis(binIdx).ontology = ontologyMetrics;
     end
 end
 
-function [proposedMetrics, baselineMetrics] = compute_bin_metrics(actualLabels, proposedLabels, baselineLabels, cfg)
+function ontologyMetrics = compute_bin_metrics(actualLabels, ontologyLabels, cfg)
     if isempty(actualLabels)
-        proposedMetrics = compute_metrics_for_empty();
-        baselineMetrics = compute_metrics_for_empty();
+        ontologyMetrics = compute_metrics_for_empty();
         return;
     end
-    proposedMetrics = compute_metrics(actualLabels, proposedLabels, cfg);
-    baselineMetrics = compute_metrics(actualLabels, baselineLabels, cfg);
+    ontologyMetrics = compute_metrics(actualLabels, ontologyLabels, cfg);
 end
 
 function metrics = compute_metrics_for_empty()

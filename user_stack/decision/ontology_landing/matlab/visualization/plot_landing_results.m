@@ -35,14 +35,14 @@ title('Final approach state');
 grid on;
 
 nexttile;
-stairs(timeVector, results.proposedLabels, 'LineWidth', 1.4); hold on;
+stairs(timeVector, results.ontologyLabels, 'LineWidth', 1.4); hold on;
 stairs(timeVector, results.trueLabels, 'LineWidth', 1.0);
 add_touchdown_marker(results);
 xlabel('Time (s)');
 ylabel('Class label');
 yticks([0 1]);
 yticklabels({'HOVER', 'LAND'});
-legend({'Proposed', 'True'}, 'Location', 'best');
+legend({'Ontology', 'True'}, 'Location', 'best');
 title('Decision trace');
 grid on;
 ylim([-0.1 1.1]);
@@ -51,14 +51,14 @@ nexttile;
 metricNames = categorical({'Accuracy', 'Precision', 'Recall', 'F1', 'Unsafe'});
 metricNames = reordercats(metricNames, {'Accuracy', 'Precision', 'Recall', 'F1', 'Unsafe'});
 metricValues = [
-    results.proposed.accuracy, results.baseline.accuracy;
-    results.proposed.precision, results.baseline.precision;
-    results.proposed.recall, results.baseline.recall;
-    results.proposed.f1Score, results.baseline.f1Score;
-    results.proposed.unsafeLandingAttemptRate, results.baseline.unsafeLandingAttemptRate];
+    results.ontology.accuracy;
+    results.ontology.precision;
+    results.ontology.recall;
+    results.ontology.f1Score;
+    results.ontology.unsafeLandingAttemptRate];
 bar(metricNames, metricValues);
 ylabel('Score');
-legend({'Proposed', 'Baseline'}, 'Location', 'best');
+legend({'Ontology'}, 'Location', 'best');
 title('Decision performance');
 grid on;
 ylim([0 1]);
@@ -118,39 +118,33 @@ ylim([0 1]);
 save_figure_if_needed(gcf, runDir, 'semantic_features', cfg);
 
 figure('Name', 'Decision Timeline', 'Color', 'w', 'Visible', visibleFlag);
-stairs(timeVector, results.proposedLabels, 'LineWidth', 1.4); hold on;
-stairs(timeVector, results.baselineLabels, 'LineWidth', 1.2);
+stairs(timeVector, results.ontologyLabels, 'LineWidth', 1.4); hold on;
 stairs(timeVector, results.trueLabels, 'LineWidth', 1.0);
 add_touchdown_marker(results);
 xlabel('Time (s)');
 ylabel('Class label');
-legend({'Proposed', 'Baseline', 'True'}, 'Location', 'best');
+legend({'Ontology', 'True'}, 'Location', 'best');
 title('Decision timeline');
 grid on;
 ylim([-0.1 1.1]);
 save_figure_if_needed(gcf, runDir, 'decision_timeline', cfg);
 
 figure('Name', 'Confusion Matrix', 'Color', 'w', 'Visible', visibleFlag);
-subplot(1, 2, 1);
-plot_confusion_matrix(results.proposed.confusionMatrix, 'Proposed');
-subplot(1, 2, 2);
-plot_confusion_matrix(results.baseline.confusionMatrix, 'Baseline');
+plot_confusion_matrix(results.ontology.confusionMatrix, 'Ontology');
 save_figure_if_needed(gcf, runDir, 'confusion_matrix', cfg);
 
 figure('Name', 'Wind Bin Analysis', 'Color', 'w', 'Visible', visibleFlag);
 binCount = numel(results.windBinAnalysis);
-proposedLandingRate = zeros(binCount, 1);
-baselineLandingRate = zeros(binCount, 1);
+ontologyLandingRate = zeros(binCount, 1);
 binLabels = cell(binCount, 1);
 for binIdx = 1:binCount
     binLabels{binIdx} = sprintf('%.0f-%.0f', results.windBinAnalysis(binIdx).lowerEdge, results.windBinAnalysis(binIdx).upperEdge);
-    proposedLandingRate(binIdx) = results.windBinAnalysis(binIdx).proposed.recall;
-    baselineLandingRate(binIdx) = results.windBinAnalysis(binIdx).baseline.recall;
+    ontologyLandingRate(binIdx) = results.windBinAnalysis(binIdx).ontology.recall;
 end
-bar([proposedLandingRate, baselineLandingRate]);
+bar(ontologyLandingRate);
 xlabel('Wind-speed bin');
 ylabel('Landing recall');
-legend({'Proposed', 'Baseline'}, 'Location', 'best');
+legend({'Ontology'}, 'Location', 'best');
 title('Landing performance by wind-speed bin');
 grid on;
 set(gca, 'XTickLabel', binLabels);
@@ -164,10 +158,8 @@ function summaryLines = build_summary_lines(results, cfg)
         sprintf('Completed scenarios : %d / %d', results.completedScenarioCount, cfg.simulation.numScenarios)
         sprintf('Samples evaluated   : %d', results.sampleCount)
         sprintf('Touchdown detected  : %d', logical_to_double(results.touchdown.detected))
-        sprintf('Proposed accuracy   : %.3f', results.proposed.accuracy)
-        sprintf('Baseline accuracy   : %.3f', results.baseline.accuracy)
-        sprintf('Proposed unsafe rate: %.3f', results.proposed.unsafeLandingAttemptRate)
-        sprintf('Baseline unsafe rate: %.3f', results.baseline.unsafeLandingAttemptRate)
+        sprintf('Ontology accuracy   : %.3f', results.ontology.accuracy)
+        sprintf('Ontology unsafe rate: %.3f', results.ontology.unsafeLandingAttemptRate)
         };
     if isfield(results, 'touchdown') && results.touchdown.detected
         summaryLines = [summaryLines; {

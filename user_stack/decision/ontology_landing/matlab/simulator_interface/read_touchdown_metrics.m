@@ -11,8 +11,8 @@ if ~exist(reader, 'file')
     return;
 end
 
-cmd = sprintf(['timeout 1.2 bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
-    'export ROS_DOMAIN_ID=0; python3 "%s" --topic "/landing_marker/touchdown_metrics" --timeout 0.7 2>/dev/null'''], reader);
+cmd = sprintf(['timeout 0.45 bash -lc ''source /opt/ros/humble/setup.bash 2>/dev/null || true; ' ...
+    'export ROS_DOMAIN_ID=0; python3 "%s" --topic "/landing_marker/touchdown_metrics" --timeout 0.20 2>/dev/null'''], reader);
 [status, output] = system(cmd);
 if status ~= 0 || isempty(strtrim(output))
     return;

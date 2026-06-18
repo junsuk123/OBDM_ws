@@ -1,5 +1,4 @@
 function metrics = evaluatePerformance(predictions, labels, cfg)
-%EVALUATEPERFORMANCE Compute performance metrics for the proposed method.
+%EVALUATEPERFORMANCE Compute performance metrics for ontology decisions.
 
-baseline = predictions;
-metrics = evaluate_landing_decisions(labels, predictions, baseline, zeros(size(labels)), cfg).proposed;
+metrics = evaluate_landing_decisions(labels, predictions, zeros(size(labels)), cfg).ontology;

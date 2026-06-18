@@ -11,8 +11,7 @@ This report separates runtime files from source files. The first refactor pass u
 | `user_stack/decision/ontology_landing/matlab/config/landing_decision_config.m` | Scenario/user-stack parameters |
 | `user_stack/decision/ontology_landing/matlab/simulator_interface/*.m` | Simulator, ROS 2, Gazebo, MAVLink adapter |
 | `user_stack/decision/ontology_landing/matlab/ontology_features/*.m` | Ontology feature extraction |
-| `user_stack/decision/ontology_landing/matlab/feature_fusion/*.m` | Feature fusion |
-| `user_stack/decision/ontology_landing/matlab/decision_model/*.m` | Decision model and baseline |
+| `user_stack/decision/ontology_landing/matlab/labeling/*.m` | Landing outcome labels and touchdown gates |
 | `user_stack/decision/ontology_landing/matlab/evaluation/*.m` | Metrics |
 | `user_stack/decision/ontology_landing/matlab/visualization/*.m` | Plot generation |
 | `matlab/core/SimulationManager.m` | Launches Gazebo/ArduPilot |

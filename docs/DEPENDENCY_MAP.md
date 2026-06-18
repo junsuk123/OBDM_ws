@@ -50,8 +50,8 @@ main.m
     gz topic /world/runway/wind
   read_landing_observation()
   compute_ontology_features()
-  fuse_features()
-  threshold_baseline_decision() or predict_gaussian_nb()
+  ontology_landing_decision()
+  evaluate_landing_ontology_graph()
   send_decision_command()
     ROS 2 guidance topics
     optional run_mavlink_command()
@@ -70,8 +70,6 @@ main.m
 - `user_stack/decision/ontology_landing/matlab/simulator_interface/*.m`
 - `user_stack/decision/ontology_landing/matlab/stochastic_model/*.m`
 - `user_stack/decision/ontology_landing/matlab/ontology_features/*.m`
-- `user_stack/decision/ontology_landing/matlab/feature_fusion/*.m`
-- `user_stack/decision/ontology_landing/matlab/decision_model/*.m`
 - `user_stack/decision/ontology_landing/matlab/labeling/*.m`
 - `user_stack/decision/ontology_landing/matlab/evaluation/*.m`
 - `user_stack/decision/ontology_landing/matlab/visualization/*.m`

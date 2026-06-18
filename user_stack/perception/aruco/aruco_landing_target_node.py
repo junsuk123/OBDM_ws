@@ -439,7 +439,8 @@ class MovingLandingTarget:
         if self.args.motion_mode == "random":
             self.vs = self.rng.uniform(self.args.random_min_speed, self.args.random_max_speed)
         elif self.args.motion_mode == "waypoints":
-            self.vs = clamp(self.args.waypoint_speed, 0.0, self.args.max_speed)
+            initial_waypoint_speed = self.random_target_speed if self.args.randomize_waypoint_speed else self.args.waypoint_speed
+            self.vs = clamp(initial_waypoint_speed, 0.0, self.args.max_speed)
         else:
             self.vs = self.rng.uniform(-self.args.initial_speed, self.args.initial_speed)
         self.accel_s = self.random_accel()
@@ -537,6 +538,12 @@ class MovingLandingTarget:
             self.waypoint_yaw_rate = 0.0
             return
 
+        if self.args.randomize_waypoint_speed:
+            now = time.monotonic()
+            if self.args.random_change_period > 0.0 and now - self.last_random_change_t > self.args.random_change_period:
+                self.random_target_speed = self.rng.uniform(self.args.random_min_speed, self.args.random_max_speed)
+                self.last_random_change_t = now
+
         target_x, target_y = self.waypoints_world[self.waypoint_index]
         dx = target_x - self.x
         dy = target_y - self.y
@@ -568,7 +575,8 @@ class MovingLandingTarget:
         self.yaw = self.wrap_angle(self.yaw + self.waypoint_yaw_rate * dt)
 
         turn_slowdown = clamp(1.0 - 0.35 * abs(heading_error), 0.55, 1.0)
-        target_speed = clamp(self.args.waypoint_speed * turn_slowdown, 0.0, self.args.max_speed)
+        base_speed = self.random_target_speed if self.args.randomize_waypoint_speed else self.args.waypoint_speed
+        target_speed = clamp(base_speed * turn_slowdown, 0.0, self.args.max_speed)
         speed_alpha = clamp(self.args.waypoint_speed_smoothing * dt, 0.0, 1.0)
         self.vs += (target_speed - self.vs) * speed_alpha
         self.vs = clamp(self.vs, 0.0, self.args.max_speed)
@@ -1120,6 +1128,7 @@ def main():
     parser.add_argument("--waypoint-speed-smoothing", type=float, default=2.4)
     parser.add_argument("--waypoint-yawrate-smoothing", type=float, default=2.2)
     parser.add_argument("--waypoint-loop", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--randomize-waypoint-speed", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--min-forward-offset-m", type=float, default=0.0)
     parser.add_argument("--max-forward-offset-m", type=float, default=2.0)
     parser.add_argument("--initial-speed", type=float, default=0.05)

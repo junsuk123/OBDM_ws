@@ -39,7 +39,7 @@ User algorithm stack:
 
 - `user_stack/perception/aruco/aruco_camera_detector_node.py`: ArUco perception and inferred pad-center estimate.
 - `user_stack/guidance/ontology_landing/realtime_ontology_trajectory_generator.py`: landing trajectory generation.
-- `user_stack/decision/ontology_landing/matlab/ontology_features`, `feature_fusion`, `decision_model`, `labeling`: ontology landing decision stack.
+- `user_stack/decision/ontology_landing/matlab/ontology_features`, `labeling`, `evaluation`: ontology landing decision stack.
 
 Evaluation and logging:
 

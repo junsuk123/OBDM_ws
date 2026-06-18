@@ -1,10 +1,10 @@
-# Ontology-Based Probabilistic UAV Landing Framework
+# Ontology-Based UAV Landing Framework
 
-This folder contains a modular MATLAB template for ontology-based probabilistic landing decisions under wind disturbance and sensor uncertainty.
+This folder contains a modular MATLAB template for ontology-based landing decisions under wind disturbance and sensor uncertainty.
 
 ## Core idea
 
-The framework combines noisy observations and ontology-derived semantic features, then uses a Gaussian Naive Bayes classifier to decide between `LAND` and `HOVER`.
+The framework combines noisy observations and ontology-derived semantic features, then evaluates a semantic landing-intent score to decide between `LAND` and `HOVER`.
 
 The observation model is written as:
 
@@ -20,10 +20,13 @@ Wind disturbance is represented as a stochastic process with:
 w(t) = w_mean(t) + w_gust(t) + w_turb(t)
 ```
 
-The Gaussian Naive Bayes posterior is:
+The ontology landing-intent evidence is a normalized weighted semantic score:
 
 ```text
-p(y = c | x) proportional to p(y = c) * product_i N(x_i | mu_ci, sigma_ci^2)
+LandingIntentEvidence =
+  f(AlignmentState, RelativeDistanceState, AltitudeState,
+    VisualStability, DescentStability, MotionStability,
+    EnergyEfficiency, WindRisk, DragRisk)
 ```
 
 For online guidance, the landing controller now evaluates one explicit ontology network:
@@ -66,7 +69,6 @@ ontology_landing_framework/
   stochastic_model/
   ontology_features/
   feature_fusion/
-  decision_model/
   labeling/
   evaluation/
   visualization/

@@ -1,4 +1,4 @@
-function export_ontology_graph_snapshot(ontologyGraph, cfg, trajectory, action, classProbability, confidence)
+function export_ontology_graph_snapshot(ontologyGraph, cfg, trajectory, action, landingIntentScore, confidence)
 %EXPORT_ONTOLOGY_GRAPH_SNAPSHOT Append one web-viewer ontology graph snapshot.
 
 if nargin < 2 || ~isstruct(cfg) || ~isfield(cfg, 'visualization')
@@ -16,17 +16,17 @@ end
 if nargin < 4
     action = '';
 end
-if nargin < 5 || isempty(classProbability)
-    classProbability = [1.0, 0.0];
+if nargin < 5 || isempty(landingIntentScore)
+    landingIntentScore = NaN;
 end
 if nargin < 6 || isempty(confidence)
-    confidence = max(classProbability);
+    confidence = 1.0;
 end
 if isempty(ontologyGraph) || ~isstruct(ontologyGraph) || ~isfield(ontologyGraph, 'nodes') || ~isfield(ontologyGraph, 'edges')
     return;
 end
 
-snapshot = build_snapshot(ontologyGraph, trajectory, action, classProbability, confidence);
+snapshot = build_snapshot(ontologyGraph, trajectory, action, landingIntentScore, confidence);
 streamPath = char(string(cfg.visualization.web3dStreamPath));
 [streamDir, ~, ~] = fileparts(streamPath);
 if ~exist(streamDir, 'dir')
@@ -42,7 +42,7 @@ cleanup = onCleanup(@() fclose(fid));
 fprintf(fid, '%s\n', jsonencode(snapshot));
 end
 
-function snapshot = build_snapshot(ontologyGraph, trajectory, action, classProbability, confidence)
+function snapshot = build_snapshot(ontologyGraph, trajectory, action, landingIntentScore, confidence)
 nodes = empty_node_array();
 for idx = 1:numel(ontologyGraph.nodes)
     source = ontologyGraph.nodes(idx);
@@ -94,8 +94,8 @@ if isfield(ontologyGraph, 'values') && isstruct(ontologyGraph.values)
     values = ontologyGraph.values;
 end
 values.action = char(string(action));
-values.classProbability = classProbability;
-values.confidence = confidence;
+values.landingIntentScore = landingIntentScore;
+values.decisionConfidence = confidence;
 
 selectedNode = choose_selected_node(ontologyGraph, trajectory);
 snapshot = struct();
@@ -148,11 +148,21 @@ trace = [
         {'AlignmentState', 'RelativeDistanceState', 'VisualStability', 'DroneMotionStability', 'TrackQuality'}, ontologyGraph)
     trace_step(3, 'Pad prediction selects the current approach aim point.', ...
         {'PadTrack', 'FuturePadPrediction', 'ApproachAimPoint'}, ontologyGraph)
-    trace_step(4, 'Intent, risk, and track quality gate guidance authority.', ...
+    trace_step(4, 'Ontology evidence selects the active GuidanceAlgorithm class member.', ...
+        {'TrackQuality', 'VisualStability', 'OperationalRisk', 'WindRisk', 'GuidanceAlgorithm', selected_guidance_node(ontologyGraph)}, ontologyGraph)
+    trace_step(5, 'Intent, risk, and track quality gate guidance authority.', ...
         {'LandingIntent', 'OperationalRisk', 'TrackQuality', 'HorizontalGuidance', 'DescentAuthority'}, ontologyGraph)
-    trace_step(5, 'Terminal readiness combines alignment, descent authority, and risk.', ...
+    trace_step(6, 'Terminal readiness combines alignment, descent authority, and risk.', ...
         {'LandingAlignment', 'DescentAuthority', 'TrackQuality', 'OperationalRisk', 'FinalLandReadiness'}, ontologyGraph)
 ];
+end
+
+function nodeId = selected_guidance_node(ontologyGraph)
+nodeId = 'GuidanceAlgorithm';
+if isfield(ontologyGraph, 'values') && isstruct(ontologyGraph.values) && ...
+        isfield(ontologyGraph.values, 'selectedGuidanceAlgorithm') && ~isempty(ontologyGraph.values.selectedGuidanceAlgorithm)
+    nodeId = char(string(ontologyGraph.values.selectedGuidanceAlgorithm));
+end
 end
 
 function item = trace_step(step, description, nodeIds, ontologyGraph)

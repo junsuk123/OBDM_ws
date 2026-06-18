@@ -7,7 +7,7 @@ sim.namespace = cfg.simulator.namespace;
 sim.isConnected = false;
 sim.currentScenario = 0;
 sim.currentStep = 0;
-sim.lastDecision = struct('action', 'HOVER', 'confidence', 0.0, 'probability', [1.0, 0.0]);
+sim.lastDecision = struct('action', 'HOVER', 'confidence', 0.0, 'landingIntentScore', 0.0);
 sim.guidance = struct('lastCommandTimestamp', -inf, 'landModeSent', false, ...
     'lastTarget', [nan, nan, nan], 'mode', 'HOVER');
 sim.previousWind = cfg.wind.meanVelocity;

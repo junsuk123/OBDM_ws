@@ -1,0 +1,782 @@
+{
+  "document": {
+    "title": "OBDM 온톨로지 및 추론 이론 정리",
+    "language": "ko",
+    "generated_date": "2026-06-18",
+    "scope": "현재 저장소의 활성 MATLAB 온톨로지 의사결정 경로, 기본 Python 실시간 궤적 생성기, 보조 ROS 2 YAML 규칙 추론 계층, 상태추정, 확률 모델, 안전 필터, 학습용 보상 이론",
+    "primary_entry_point": "user_stack/decision/ontology_landing/matlab/main.m",
+    "default_realtime_guidance": "user_stack/guidance/ontology_landing/realtime_ontology_trajectory_generator.py",
+    "interpretation_note": "이 시스템의 온톨로지는 OWL/RDF 기술논리 추론기가 아니라, 의미 노드와 관계를 명시하고 정규화된 특징, 가중 점수, 순서 규칙, 상태기계, 안전 게이트를 결합한 경량 하이브리드 온톨로지이다."
+  },
+  "system_summary": {
+    "architecture_type": "hybrid_semantic_reasoning_and_control",
+    "reasoning_paradigms": [
+      "경량 의미 그래프",
+      "가중합 기반 연성 추론",
+      "곱셈형 퍼지 AND 게이트",
+      "임계값 기반 이진 의사결정",
+      "순서 우선 규칙 추론",
+      "상태기계 및 히스테리시스",
+      "확률적 관측 모델",
+      "Kalman 계열 상태추정",
+      "점수 기반 알고리즘 선택",
+      "예측 제어 후보 탐색",
+      "CBF 스타일 안전 제약",
+      "지도 결과 대비 의미 가중치 학습",
+      "강화학습용 보상 설계"
+    ],
+    "runtime_flow": [
+      "UAV, 패드, 마커, 바람 관측 수집",
+      "센서 잡음 및 바람 불확실성 처리",
+      "원시값을 0~1 의미 특징으로 변환",
+      "OperationalRisk, TrackQuality, LandingIntent 추론",
+      "INTERCEPT, PAD_CAPTURE, FINAL_DESCENT, LAND_READY 상태 추론",
+      "XY 및 고도 유도 알고리즘 점수화와 선택",
+      "실시간 제어 파라미터 추론",
+      "DescentAuthority와 FinalLandReadiness 계산",
+      "안전 필터를 거친 속도, 가속도, 위치 명령 출력",
+      "착륙 결과 라벨링과 정책 가중치 및 RL 데이터 생성"
+    ]
+  },
+  "ontology_model": {
+    "formalism": {
+      "current": "lightweight_semantic_graph_and_rules",
+      "not_currently_used": [
+        "OWL",
+        "RDF",
+        "RDFS",
+        "Description Logic reasoner",
+        "SPARQL rule execution"
+      ],
+      "future_mapping": [
+        "LandingSituation",
+        "WindRisk",
+        "MarkerReliability",
+        "PlatformMotionRisk",
+        "DescentSafety",
+        "LandingMode",
+        "AbortCondition"
+      ]
+    },
+    "layers": [
+      {
+        "name": "evidence",
+        "concepts": [
+          "VehicleState",
+          "PadTrack",
+          "marker visibility",
+          "provider confidence",
+          "wind state",
+          "battery",
+          "obstacle distance"
+        ]
+      },
+      {
+        "name": "semantic",
+        "concepts": [
+          "WindRisk",
+          "DragRisk",
+          "VisualStability",
+          "AlignmentState",
+          "AttitudeStability",
+          "DescentStability",
+          "TimeEfficiency",
+          "EnergyEfficiency",
+          "RelativeDistanceState",
+          "AltitudeState",
+          "DroneMotionStability",
+          "RoverMotionStability",
+          "RelativeMotionStability"
+        ]
+      },
+      {
+        "name": "inference",
+        "concepts": [
+          "OperationalRisk",
+          "TrackQuality",
+          "LandingIntent",
+          "Efficiency",
+          "OvershootRisk",
+          "VelocityAuthority",
+          "AccelAuthority"
+        ]
+      },
+      {
+        "name": "prediction_and_trajectory",
+        "concepts": [
+          "FuturePadPrediction",
+          "ApproachAimPoint",
+          "HorizontalGuidance",
+          "DescentAuthority",
+          "LandingAlignment",
+          "FinalLandReadiness"
+        ]
+      },
+      {
+        "name": "algorithm_and_parameter_selection",
+        "concepts": [
+          "XYGuidanceAlgorithm",
+          "AltitudeGuidanceAlgorithm",
+          "GuidanceParameterSetting",
+          "LookaheadTuning",
+          "PredictionHorizonTuning",
+          "ControlAuthorityTuning",
+          "SafetyEnvelopeTuning",
+          "WindCompensationTuning"
+        ]
+      }
+    ],
+    "principal_relations": [
+      {
+        "source": "WindRisk",
+        "target": "OperationalRisk",
+        "relation": "increases",
+        "weight": 0.25
+      },
+      {
+        "source": "DragRisk",
+        "target": "OperationalRisk",
+        "relation": "increases",
+        "weight": 0.2
+      },
+      {
+        "source": "AlignmentState",
+        "target": "TrackQuality",
+        "relation": "supports",
+        "weight": 0.3
+      },
+      {
+        "source": "VisualStability",
+        "target": "TrackQuality",
+        "relation": "supports",
+        "weight": 0.25
+      },
+      {
+        "source": "LandingIntent",
+        "target": "DescentAuthority",
+        "relation": "enables",
+        "weight": 0.2
+      },
+      {
+        "source": "OperationalRisk",
+        "target": "DescentAuthority",
+        "relation": "limits",
+        "weight": 0.18
+      },
+      {
+        "source": "TrackQuality",
+        "target": "FinalLandReadiness",
+        "relation": "supports",
+        "weight": 0.35
+      },
+      {
+        "source": "OperationalRisk",
+        "target": "FinalLandReadiness",
+        "relation": "limits",
+        "weight": 0.3
+      }
+    ]
+  },
+  "normalization_and_semantic_features": {
+    "common_operator": {
+      "name": "bounded_min_max_normalization",
+      "formula": "normalize(x; min, max) = clamp((x - min) / (max - min), 0, 1)",
+      "theory": "서로 다른 단위의 연속값을 동일한 [0,1] 의미 활성도 공간으로 사상한다.",
+      "implementation": "user_stack/decision/ontology_landing/matlab/ontology_features/normalize_feature.m"
+    },
+    "features": [
+      {
+        "name": "DragForce",
+        "formula": "F_d = 0.5 * rho * C_d * A * ||v_uav - v_wind||^2",
+        "theory": "표준 이차 공기저항 모델",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "DragPower",
+        "formula": "P_d = F_d * max(horizontalSpeed, |verticalSpeed|)",
+        "theory": "항력에 의해 요구되는 기계적 출력의 근사",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "DragRisk",
+        "formula": "clamp(0.35*dragDisturbanceNorm + 0.35*dragForceNorm + 0.30*dragPowerNorm)",
+        "theory": "다중 항력 지표의 가중합 위험 융합",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "WindRisk",
+        "formula": "clamp(0.30*windSpeedNorm + 0.20*windAccelerationNorm + 0.15*directionChangeNorm + 0.35*DragRisk)",
+        "theory": "풍속, 돌풍 가속도, 방향 변동, 항력의 연성 위험 결합",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "AlignmentState",
+        "formula": "clamp(0.60*positionAlignment + 0.40*yawAlignment)",
+        "theory": "위치 정렬과 요 정렬의 가중 의미 융합",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "AttitudeStability",
+        "formula": "clamp(0.50*rollStability + 0.50*pitchStability)",
+        "theory": "롤·피치 안정도 평균",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "DescentStability",
+        "formula": "1 - normalize(|verticalSpeed - targetDescentRate|; 0, descentTolerance)",
+        "theory": "목표 강하율과의 오차 기반 안정도",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "DroneMotionStability",
+        "formula": "clamp(0.35*droneSpeedStability + 0.35*descentStability + 0.30*attitudeStability)",
+        "theory": "수평 운동, 수직 운동, 자세 안정성의 복합 상태",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "RoverMotionStability",
+        "formula": "1 - normalize(platformSpeed; 0, roverSpeedReference)",
+        "theory": "이동 패드 속도가 낮을수록 높은 안정도",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "TimeEfficiency",
+        "formula": "1 - normalize(pathLength / max(horizontalGroundSpeed, 0.25); 0, timeToTargetReference)",
+        "theory": "예상 도달시간 기반 효율",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "EnergyEfficiency",
+        "formula": "1 - normalize(pathLength*DragForce + 0.15*|altitude|*DragForce)",
+        "theory": "경로 길이와 항력 기반 에너지 비용의 휴리스틱 근사",
+        "implementation_status": "active_matlab"
+      },
+      {
+        "name": "VisualStability",
+        "formula": "ROS 관측 시 clamp(1 - 0.45*alignmentPenalty - 0.35*windPenalty), 모의 관측 시 여기에 Gaussian noise 추가",
+        "theory": "정렬과 바람이 영상 안정도를 저하시킨다는 경험 모델",
+        "implementation_status": "active_matlab"
+      }
+    ]
+  },
+  "reasoning_theories": [
+    {
+      "id": "R01",
+      "name": "가중합 기반 의미 증거 추론",
+      "category": "soft_reasoning",
+      "theory": "각 의미 특징을 [0,1] 활성도로 표현하고 전문가 가중합으로 착륙 의도를 계산한다. 엄밀한 확률 posterior가 아니라 해석 가능한 선형 점수이다.",
+      "formula": "LandingIntentEvidence = clamp(0.18*Alignment + 0.16*RelativeDistance + 0.13*Altitude + 0.13*Visual + 0.11*DescentStability + 0.10*DroneMotion + 0.08*RoverMotion + 0.06*EnergyEfficiency + 0.05*(1 - RiskPenalty))",
+      "subformula": "RiskPenalty = clamp(0.55*WindRisk + 0.45*DragRisk)",
+      "decision_rule": "score >= ontologyIntentThreshold(기본 0.62)이면 LAND, 아니면 HOVER",
+      "confidence_formula": "clamp(|score-threshold| / max(threshold,1-threshold) * 0.5 + 0.5)",
+      "implementation": [
+        "user_stack/decision/ontology_landing/matlab/main.m",
+        "user_stack/decision/ontology_landing/matlab/ontology_features/evaluate_landing_ontology_graph.m"
+      ],
+      "status": "active"
+    },
+    {
+      "id": "R02",
+      "name": "퍼지 논리형 곱셈 게이트",
+      "category": "fuzzy_conjunctive_reasoning",
+      "theory": "착륙에 필요한 조건을 곱하여 한 조건이라도 낮으면 전체 권한이 급격히 감소하게 한다. 표준 min t-norm은 아니지만 product t-norm과 유사하다.",
+      "formula_matlab": "DescentAuthority = clamp(LandingIntent * RelativeDistanceState * AltitudeState * VisualStability * DroneMotionStability * RoverMotionStability * EnergyEfficiency * (1-OperationalRisk))",
+      "formula_python": "DescentAuthority = clamp(LandingIntent * AlignmentState * VisualStability * AttitudeStability * DescentStability * lerp(0.60,1.0,AltitudeState) * EnergyEfficiency * (1-OperationalRisk))",
+      "interpretation": "근접성, 고도, 시각 신뢰도, 운동 안정성, 에너지, 위험을 모두 만족해야 강하 권한이 커진다.",
+      "status": "active_with_matlab_python_formula_difference"
+    },
+    {
+      "id": "R03",
+      "name": "통합 운용 위험 추론",
+      "category": "risk_aggregation",
+      "formula_matlab": "OperationalRisk = clamp(0.25*WindRisk + 0.20*DragRisk + 0.18*(1-EnergyEfficiency) + 0.14*(1-DroneMotionStability) + 0.13*(1-RoverMotionStability) + 0.10*(1-VisualStability))",
+      "formula_python": "OperationalRisk = clamp(0.30*WindRisk + 0.25*DragRisk + 0.15*TerminalRelativeMotionRisk + 0.20*(1-EnergyEfficiency) + 0.10*(1-AttitudeStability))",
+      "theory": "위험 원인을 독립적 기여도로 보고 가중합한 뒤 [0,1]로 제한하는 위험 지수 모델",
+      "status": "active"
+    },
+    {
+      "id": "R04",
+      "name": "추적 품질 추론",
+      "category": "evidence_quality",
+      "formula_matlab": "TrackQuality = clamp(0.30*Alignment + 0.25*RelativeDistance + 0.25*VisualStability + 0.20*DroneMotionStability)",
+      "formula_python": "TrackQuality = clamp(ProviderConfidence * (0.45*Alignment + 0.35*VisualStability + 0.20*AttitudeStability))",
+      "theory": "기하 정렬, 시각 안정도, 플랫폼 제공자 신뢰도와 기체 안정도를 결합한 관측 신뢰 지수",
+      "status": "active"
+    },
+    {
+      "id": "R05",
+      "name": "순서 우선 생산 규칙",
+      "category": "symbolic_rule_reasoning",
+      "theory": "YAML 규칙을 위에서 아래로 평가하고 최초 일치 규칙의 결론을 채택한다. 폐쇄세계 가정에 가까운 보수적 기본값 HOVER_AND_ALIGN을 사용한다.",
+      "conflict_resolution": "first_match_wins",
+      "default_conclusion": {
+        "landing_phase": "HOLD",
+        "selected_mode": "HOVER_AND_ALIGN",
+        "risk_level": "MEDIUM",
+        "allowed_to_descend": false,
+        "abort_required": false
+      },
+      "implementation": "src/landing_ontology_reasoner/rules/landing_rules.yaml",
+      "status": "available_auxiliary_ros2_stack"
+    },
+    {
+      "id": "R06",
+      "name": "상태기계와 히스테리시스",
+      "category": "temporal_reasoning",
+      "states": [
+        "INTERCEPT",
+        "PAD_CAPTURE",
+        "FINAL_DESCENT",
+        "LAND_READY"
+      ],
+      "transition_basis": "패드까지의 거리와 패드 위 고도",
+      "hysteresis": "PAD_CAPTURE와 FINAL_DESCENT에서 별도 exit radius를 사용하여 경계에서 모드 채터링을 억제한다.",
+      "theory": "연속 의미값을 단계적 임무 상태로 양자화하고 이전 상태를 기억하는 유한상태기계",
+      "implementation": "user_stack/guidance/ontology_landing/realtime_ontology_trajectory_generator.py",
+      "status": "active_default_runtime"
+    },
+    {
+      "id": "R07",
+      "name": "점수 경쟁 기반 알고리즘 선택",
+      "category": "meta_reasoning",
+      "theory": "각 유도 알고리즘의 적합도를 의미 상태로 점수화하고 argmax로 선택한다.",
+      "xy_candidates": [
+        "Vision_FOV_Constrained_Guidance",
+        "MPC_NMPC_Pad_Prediction_Tracking",
+        "Receding_Horizon_Trajectory_Optimization_Robust_Guidance"
+      ],
+      "altitude_candidates": [
+        "Ontology_Gated_PD_Descent",
+        "Minimum_Jerk_Terminal_Descent",
+        "CBF_Safety_Constrained_Descent_Filter"
+      ],
+      "selection_rule": "selected = argmax(candidate_score)",
+      "important_runtime_detail": "MATLAB 고도 선택에서 CBF 후보가 최고점이어도 실제 선택명은 Ontology_Gated_PD_Descent로 되돌리고 CBF는 후단 안전 필터로 적용한다.",
+      "status": "active"
+    },
+    {
+      "id": "R08",
+      "name": "의미 대비 학습",
+      "category": "interpretable_supervised_weight_learning",
+      "theory": "성공군과 실패군의 각 의미 특징 평균 차이를 양수화하고 합이 1이 되도록 정규화하여 온톨로지 가중치의 warm-start를 만든다.",
+      "formula": "w = normalize_positive(mean(feature|target_class) - mean(feature|opposite_class))",
+      "descent_exponent_formula": "exponent = 0.5 + 1.5*normalize_positive(success_mean - failure_mean)",
+      "artifact": [
+        "ontology_policy.mat",
+        "ontology_policy.json"
+      ],
+      "important_runtime_detail": "현재 생성된 정책 파일은 해석 가능한 산출물이지만, main.m의 온라인 LAND/HOVER 점수는 고정 가중식을 사용하므로 학습 가중치가 자동으로 온라인 식에 재주입되지는 않는다.",
+      "implementation": "user_stack/decision/ontology_landing/matlab/main.m",
+      "status": "active_training_artifact"
+    }
+  ],
+  "probabilistic_and_state_estimation_theories": [
+    {
+      "name": "가산 Gaussian 센서 잡음",
+      "formula": "x_obs(t) = x_true(t) + n(t), n(t) ~ N(0, sigma^2)",
+      "uses": [
+        "position",
+        "altitude",
+        "attitude",
+        "tag center",
+        "visual stability"
+      ],
+      "implementation": [
+        "user_stack/decision/ontology_landing/matlab/stochastic_model/applySensorNoise.m",
+        "user_stack/decision/ontology_landing/matlab/stochastic_model/generate_sensor_noise.m"
+      ],
+      "status": "active_for_mock_and_stochastic_data"
+    },
+    {
+      "name": "시간상관 바람 과정",
+      "formula": "w(t) = rotated_scaled_mean + gust(t) + turbulence(t)",
+      "correlation": "alpha = exp(-dt/tau), x_k = alpha*x_{k-1} + sqrt(1-alpha^2)*sigma*epsilon_k",
+      "theory": "Ornstein-Uhlenbeck 또는 1차 Gauss-Markov 과정과 유사한 평균회귀 난류 모델에 별도 저주파 gust와 방향/속도 drift를 결합한다.",
+      "implementation": "user_stack/decision/ontology_landing/matlab/stochastic_model/generate_wind_process.m",
+      "status": "active"
+    },
+    {
+      "name": "마커 검출 Bernoulli 모델",
+      "formula": "p_detect = clamp(0.95*exp(-0.45*positionError)*exp(-0.20*max(0,altitude-tagVisibleAltitude)))",
+      "sampling": "tagDetected ~ Bernoulli(p_detect)",
+      "theory": "거리와 고도에 따라 지수적으로 감소하는 시야 검출 확률",
+      "implementation": "user_stack/decision/ontology_landing/matlab/simulator_interface/read_landing_observation.m",
+      "status": "active_in_mock_observation_path"
+    },
+    {
+      "name": "선형 상수속도 EKF",
+      "state": "[x,y,z,vx,vy,vz]",
+      "prediction": "x_k^- = F*x_{k-1}, P_k^- = F*P_{k-1}*F' + Q",
+      "correction": "K = P^-H'*(H*P^-H'+R)^-1; x = x^- + K(z-Hx^-); P=(I-KH)P^-",
+      "theory": "패드 위치와 속도를 상수속도 동역학으로 추정하는 선형 Kalman filter. 코드명은 EKF지만 현재 측정식과 동역학은 선형이다.",
+      "implementation": "user_stack/decision/ontology_landing/matlab/simulator_interface/send_decision_command.m",
+      "status": "active_matlab_path"
+    },
+    {
+      "name": "alpha-beta 형태의 경량 추정기",
+      "formula": "prediction = constant_velocity; estimate = prediction + alpha*(measurement-prediction)",
+      "theory": "Python 실시간 생성기의 ekf_state는 공분산 EKF가 아니라 위치·속도별 지수 보정 이득을 쓰는 alpha-beta 필터에 가깝다.",
+      "implementation": "user_stack/guidance/ontology_landing/realtime_ontology_trajectory_generator.py",
+      "status": "active_default_runtime"
+    },
+    {
+      "name": "착륙 posterior 명명 점수",
+      "formula": "LandingPosterior = clamp(ProviderConfidence*(0.55*VisualStability + 0.45*AlignmentState))",
+      "theory": "Bayes 정리를 직접 적용한 posterior는 아니며, 제공자 신뢰도와 의미 증거를 곱한 휴리스틱 신뢰 점수이다.",
+      "status": "active_python"
+    }
+  ],
+  "guidance_and_control_theories": [
+    {
+      "name": "미래 패드 예측 및 선행 유도",
+      "formula": "p_lead = p_pad + v_pad*t_lead; p_future = p_pad + v_pad*t_future; aim=(1-blend)*p_lead+blend*p_future",
+      "lead_time": "거리/closing speed와 의미 기반 최대 선행시간을 조합",
+      "theory": "상수속도 표적 예측과 pursuit lead",
+      "status": "active"
+    },
+    {
+      "name": "Vision/FOV constrained PD guidance",
+      "formula": "v_cmd = visionGate*(Kp*positionError + Kd*relativeVelocity + Kff*padVelocity)",
+      "gate": "visionGate = VisualStability*(1-normalizedTagCenterError)",
+      "theory": "시각 신뢰도 게이트가 적용된 PD 및 표적속도 feed-forward",
+      "status": "active_matlab_and_python_wrapper"
+    },
+    {
+      "name": "Pure Pursuit",
+      "formula": "lookahead = clamp(k_L*distance + L_min); a_lat = k*v^2*sin(alpha)/lookahead",
+      "theory": "전방 carrot point를 추종하는 기하학적 경로 유도",
+      "status": "implemented_python_profile_not_one_of_three_default_meta_candidates"
+    },
+    {
+      "name": "Line Of Sight guidance",
+      "formula": "aim = current + unit(target-current)*LOS_distance; v_cmd = unit*speed + blend*v_pad",
+      "theory": "현재 위치와 표적을 잇는 시선 방향 추종",
+      "status": "active_as_vision_wrapper_in_python"
+    },
+    {
+      "name": "L1 guidance",
+      "formula": "L1_distance = speed*damping_time + distance_gain*range; a_lat = k*v^2*sin(eta)/L1_distance",
+      "theory": "속도 벡터와 목표 경로의 각도 오차를 횡가속도로 변환하는 L1 유도",
+      "status": "implemented_python"
+    },
+    {
+      "name": "Nonlinear Guidance Law",
+      "formula": "radius = k_r*range + offset; a_lat = k*v^2*sin(eta)/radius",
+      "theory": "look-ahead 원 반경을 이용한 비선형 횡방향 유도",
+      "status": "implemented_python"
+    },
+    {
+      "name": "Vector Field guidance",
+      "formula": "v_cmd = attractive + tangent + marker_velocity_feedforward - wind_gain*wind",
+      "theory": "목표 방향의 인력장, 접선장, 이동표적 속도, 바람 보상을 결합",
+      "status": "active_as_robust_guidance_wrapper_in_python"
+    },
+    {
+      "name": "Proportional Navigation",
+      "formula": "LOS_rate=(r_x*v_y-r_y*v_x)/||r||^2; closing=-r dot v_rel/||r||; a_lat=N*closing*LOS_rate",
+      "theory": "미사일 유도에서 유래한 비례항법으로 시선 회전율을 억제",
+      "status": "implemented_python"
+    },
+    {
+      "name": "Sliding-mode-inspired robust guidance",
+      "formula": "s = relativeVelocity + lambda*positionError; robustTerm=sat(s/phi)",
+      "command": "v_cmd=Kp*error+Kd*relativeVelocity+Krobust*windScale*riskGate*robustTerm+0.25*v_pad",
+      "theory": "경계층 saturation을 사용해 채터링을 줄인 sliding variable 기반 강인 보정",
+      "status": "active_matlab"
+    },
+    {
+      "name": "Cubic terminal trajectory shaping",
+      "formula": "종단 위치와 속도를 만족하도록 3차 궤적의 초기 가속도를 계산",
+      "theory": "고정 horizon 경계조건 기반 다항식 궤적 생성",
+      "status": "implemented_python"
+    },
+    {
+      "name": "MPC-style finite candidate search",
+      "objective": "J = 3*||positionError||^2 + 0.9*||velocityError||^2 + 0.08*||acceleration||^2",
+      "method": "유한한 가속도 후보를 전방 시뮬레이션하고 최소 비용 후보 선택",
+      "theory": "receding-horizon optimal control의 단순 이산 후보 근사",
+      "limitation": "연속 최적화 solver를 사용하는 정식 선형 MPC는 아니다.",
+      "status": "active_python"
+    },
+    {
+      "name": "NMPC-style nonlinear candidate augmentation",
+      "method": "MPC 후보에 표적 방향 및 접선 방향 비선형 가속도 후보를 추가",
+      "theory": "비선형 동작 후보를 포함한 receding-horizon 탐색",
+      "limitation": "동역학 제약을 푸는 정식 NMPC solver는 아니다.",
+      "status": "implemented_python"
+    },
+    {
+      "name": "CBF-style corridor penalty",
+      "formula": "J += barrierWeight*max(0, ||terminalError||-corridor)^2",
+      "theory": "안전 집합 위반을 비용으로 벌점화하는 soft barrier",
+      "limitation": "h_dot + alpha(h) >= 0 형태를 강제하는 정식 CBF-QP는 아니다.",
+      "status": "implemented_python_and_deterministic_matlab_filter"
+    },
+    {
+      "name": "Impact-aware MPC",
+      "formula": "J += impactWeight*terminalBlend*||relativeTerminalVelocity||^2",
+      "theory": "착지 직전 상대 충돌 속도를 줄이도록 종단 비용 추가",
+      "status": "implemented_python"
+    },
+    {
+      "name": "Ontology-gated altitude PD",
+      "formula": "v_z = clamp(Kp*(z_touchdown-z)-Kd*v_z, -maxDescent*DescentAuthority, maxAscent)",
+      "theory": "PD 강하 명령의 하강 한도를 의미 추론 권한으로 제한",
+      "status": "active_matlab"
+    },
+    {
+      "name": "Minimum-jerk terminal descent",
+      "formula": "q(s)=10s^3-15s^4+6s^5; z_ref=z0+(zf-z0)q(s)",
+      "theory": "위치, 속도, 가속도 경계가 부드러운 5차 minimum-jerk 궤적",
+      "activation": "XY, 시각, 풍위험, 고도, FinalLandReadiness 게이트를 모두 만족할 때",
+      "status": "active_matlab_when_ready"
+    },
+    {
+      "name": "Deterministic CBF-style altitude safety filter",
+      "barrier_functions": [
+        "hXY = allowedXYError(altitude)-xyError",
+        "hVZ = maxDescent-|verticalSpeed|"
+      ],
+      "rules": [
+        "hXY<0이면 하강 금지",
+        "위험 게이트가 낮으면 하강률을 25%로 제한",
+        "touchdown 높이에서 XY 오차가 크면 하강 금지",
+        "수직속도 장벽 위반 시 하강률을 35%로 제한"
+      ],
+      "theory": "안전 집합 밖으로 나가는 명령을 직접 투영·클램프하는 제어 장벽 함수 스타일 필터",
+      "status": "active_matlab"
+    }
+  ],
+  "symbolic_yaml_rules": {
+    "thresholds": {
+      "high_wind_mps": 8,
+      "low_wind_mps": 3,
+      "marker_confidence_min": 0.55,
+      "marker_confidence_final": 0.75,
+      "direct_descent_distance_m": 1,
+      "minimum_time_distance_m": 4,
+      "platform_speed_safe_mps": 0.3,
+      "attitude_error_max_deg": 12,
+      "low_altitude_m": 2,
+      "battery_critical_pct": 15,
+      "obstacle_safe_distance_m": 1.5
+    },
+    "ordered_rules": [
+      {
+        "priority": 1,
+        "name": "marker_lost_low_altitude",
+        "condition": "not marker_visible and altitude < low_altitude_m",
+        "conclusion": "ASCEND_AND_RESEARCH"
+      },
+      {
+        "priority": 2,
+        "name": "critical_battery_visible_pad",
+        "condition": "battery_level <= battery_critical_pct and marker_visible",
+        "conclusion": "EMERGENCY_LAND"
+      },
+      {
+        "priority": 3,
+        "name": "critical_battery_no_pad",
+        "condition": "battery_level <= battery_critical_pct and not marker_visible",
+        "conclusion": "ABORT_LANDING"
+      },
+      {
+        "priority": 4,
+        "name": "high_wind",
+        "condition": "wind_speed > high_wind_mps",
+        "conclusion": "CONSERVATIVE_APPROACH"
+      },
+      {
+        "priority": 5,
+        "name": "obstacle_near_path",
+        "condition": "obstacle_distance < obstacle_safe_distance_m",
+        "conclusion": "HOVER_AND_ALIGN"
+      },
+      {
+        "priority": 6,
+        "name": "safe_direct_descent",
+        "condition": "marker visible/confident, close range, slow platform, low wind, low attitude error",
+        "conclusion": "DIRECT_DESCENT"
+      },
+      {
+        "priority": 7,
+        "name": "minimum_time_when_safe",
+        "condition": "marker reliable, far range, low wind, slow platform, low attitude error",
+        "conclusion": "MINIMUM_TIME_APPROACH"
+      },
+      {
+        "priority": 8,
+        "name": "marker_visible_tracking",
+        "condition": "marker_visible and marker_confidence > marker_confidence_min",
+        "conclusion": "TRACKING_APPROACH"
+      }
+    ],
+    "implementation": "src/landing_ontology_reasoner/rules/landing_rules.yaml"
+  },
+  "terminal_and_safety_reasoning": {
+    "final_land_readiness": {
+      "matlab_formula": "clamp(LandingIntent*TrackQuality*LandingAlignment*DescentAuthority*(1-OperationalRisk))",
+      "python_formula": "clamp(LandingIntent*TrackQuality*(1-OperationalRisk))",
+      "meaning": "최종 LAND 또는 직접 착륙 모드에 들어갈 준비도"
+    },
+    "landing_alignment": {
+      "formula": "clamp(0.50*AlignmentState + 0.20*VisualStability + 0.15*(1-normalizedRelativeSpeed) + 0.15*(1-normalizedHorizontalSpeed))",
+      "meaning": "패드 중심 정렬과 상대속도 감쇠를 함께 평가"
+    },
+    "overshoot_risk": {
+      "inputs": [
+        "terminal relative motion",
+        "attitude instability",
+        "wind risk",
+        "drag risk",
+        "provider uncertainty"
+      ],
+      "effects": [
+        "velocity Kp 감소",
+        "velocity Kd 증가",
+        "acceleration authority 감소",
+        "최대 속도 및 가속도 감소",
+        "상대속도 반대 방향 braking 증가"
+      ]
+    },
+    "contact_reasoning": {
+      "principles": [
+        "이륙 고도 도달 전 접촉 판정 비활성화",
+        "Gazebo 패드 contact를 성공 판정의 우선 증거로 사용",
+        "고도/XY 임계값은 설정에 따라 fallback으로 사용",
+        "패드 접촉과 지면 접촉을 분리"
+      ]
+    }
+  },
+  "learning_and_evaluation_theories": {
+    "outcome_labeling": {
+      "criteria": [
+        "safe altitude",
+        "safe vertical speed",
+        "safe roll/pitch",
+        "safe position error",
+        "safe tag stability and optional detection"
+      ],
+      "formula": "safeScore = mean(Boolean criteria)",
+      "decision": "safeScore >= 0.75이면 SAFE_LANDING",
+      "theory": "다중 안전 조건의 동일 가중 voting"
+    },
+    "reinforcement_reward": {
+      "formula": "R = 0.30*tracking + 0.22*smoothness + 0.16*efficiency + 0.10*coverage + 0.12*trackQuality + 0.10*riskScore + terminalReward",
+      "smoothness": "목표 궤적의 2차 차분 크기를 패널티로 사용",
+      "terminal_reward": "성공 bonus 또는 실패 penalty",
+      "important_status": "현재 코드는 RL 정책을 온라인 학습하지 않고, 학습용 episode/reward 데이터셋을 생성한다."
+    },
+    "evaluation_metrics": [
+      "confusion matrix",
+      "accuracy",
+      "precision",
+      "recall",
+      "F1",
+      "unsafe landing attempt rate",
+      "wind-bin performance",
+      "tracking error",
+      "final error",
+      "path efficiency",
+      "target smoothness",
+      "marker coverage",
+      "capture time"
+    ]
+  },
+  "implementation_status_and_caveats": [
+    {
+      "topic": "Formal ontology",
+      "status": "not_implemented",
+      "detail": "OWL/RDF/기술논리 reasoner는 사용하지 않는다. 현재 의미 그래프는 설명 가능성과 시각화를 위한 계산 그래프이다."
+    },
+    {
+      "topic": "Gaussian Naive Bayes",
+      "status": "not_in_current_active_tree",
+      "detail": "문서에는 Gaussian NB 학습 언급이 남아 있지만 관련 decision_model 파일은 현재 작업 트리에서 삭제 상태이고 main.m의 온라인 추론은 고정 의미 점수를 사용한다."
+    },
+    {
+      "topic": "Learned ontology policy application",
+      "status": "artifact_only",
+      "detail": "학습된 ontology_policy.json을 저장하지만 현재 온라인 점수식과 그래프 가중치가 이 정책을 자동 로드해 적용하지 않는다."
+    },
+    {
+      "topic": "MPC/NMPC",
+      "status": "approximate",
+      "detail": "Python 구현은 유한 가속도 후보 탐색이다. 정식 QP/NLP solver와 모델 제약 최적화는 아니다."
+    },
+    {
+      "topic": "CBF",
+      "status": "cbf_style",
+      "detail": "MATLAB은 결정론적 안전 클램프, Python은 corridor 위반 soft penalty를 사용한다. 엄밀한 CBF-QP 불변집합 보장은 없다."
+    },
+    {
+      "topic": "Python EKF naming",
+      "status": "approximate",
+      "detail": "Python의 marker EKF는 공분산을 유지하지 않는 alpha-beta형 필터이다. MATLAB pad EKF는 선형 Kalman filter 식을 실제 사용한다."
+    },
+    {
+      "topic": "MATLAB/Python semantic consistency",
+      "status": "partially_divergent",
+      "detail": "OperationalRisk, TrackQuality, DescentAuthority, FinalLandReadiness 식과 일부 기준값이 서로 다르다. 기본 실행에서 Python이 실시간 XY 명령을 담당하므로 검증 시 어느 그래프 값을 제어에 사용했는지 구분해야 한다."
+    },
+    {
+      "topic": "YAML reasoner integration",
+      "status": "auxiliary_stack",
+      "detail": "src/landing_ontology_reasoner 규칙은 모듈형 ROS 2 계층용이다. 현재 기본 통합 진입점 main.m의 LAND/HOVER 점수 추론과는 별도 경로이다."
+    }
+  ],
+  "source_map": [
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/main.m",
+      "role": "주 실행 흐름, LAND/HOVER 의미 점수, 신뢰도, 정책 가중치 학습"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/ontology_features/compute_ontology_features.m",
+      "role": "원시 관측에서 의미 특징 계산"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/ontology_features/evaluate_landing_ontology_graph.m",
+      "role": "온톨로지 그래프, 위험/품질/권한 추론, 알고리즘 선택 및 파라미터 추론"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/guidance/compute_xy_guidance.m",
+      "role": "Vision, MPC형, 강인 XY 유도"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/guidance/compute_altitude_guidance.m",
+      "role": "온톨로지 게이트 PD와 minimum-jerk 고도 유도"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/guidance/apply_altitude_safety_filter.m",
+      "role": "CBF 스타일 수직 안전 필터"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/simulator_interface/send_decision_command.m",
+      "role": "패드 Kalman 추정, 온톨로지 결과의 실제 명령 변환"
+    },
+    {
+      "path": "user_stack/guidance/ontology_landing/realtime_ontology_trajectory_generator.py",
+      "role": "기본 실시간 의미 추론, 상태기계, 다중 유도법, 후보 기반 MPC/NMPC/CBF, 속도·가속도 권한 조절"
+    },
+    {
+      "path": "src/landing_ontology_reasoner/rules/landing_rules.yaml",
+      "role": "순서 우선 상징 규칙"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/stochastic_model/generate_wind_process.m",
+      "role": "시간상관 확률 바람 생성"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/labeling/label_landing_outcome.m",
+      "role": "착륙 결과 자동 라벨링"
+    },
+    {
+      "path": "user_stack/decision/ontology_landing/matlab/evaluation/build_reinforcement_training_data.m",
+      "role": "강화학습용 보상 및 episode 데이터 생성"
+    },
+    {
+      "path": "docs/ontology_design.md",
+      "role": "경량 규칙 온톨로지 설계와 정식 온톨로지 확장 방향"
+    }
+  ]
+}
